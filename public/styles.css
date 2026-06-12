@@ -306,7 +306,7 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .scope-badge.in { color: var(--accent); background: rgba(47, 129, 247, 0.14); }
 .scope-badge.out { color: var(--muted); background: var(--panel-2); }
 .scope-ov { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--medium); border: 1px solid var(--medium); border-radius: 5px; padding: 0 4px; cursor: help; }
-.scope-edit { font-size: 12px; padding: 1px 5px; border: 0; background: transparent; color: var(--muted); cursor: pointer; opacity: 0.55; vertical-align: middle; }
+.scope-edit { font-size: 16px; line-height: 1; padding: 3px 6px; border: 0; background: transparent; color: var(--muted); cursor: pointer; opacity: 0.6; vertical-align: middle; }
 .scope-edit:hover { opacity: 1; color: var(--text); }
 .scope-opts { display: flex; flex-direction: column; gap: 9px; }
 .scope-opt { display: flex; gap: 9px; align-items: flex-start; cursor: pointer; }
@@ -409,7 +409,9 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .comp-check-col { width: 30px; text-align: center; }
 .comp-check, .comp-check-all { accent-color: var(--accent); cursor: pointer; }
 .comp-row { cursor: default; }
-.comp-row.cursor > td { box-shadow: inset 3px 0 0 0 var(--accent); }
+/* Cursor = accent bar on the row's left edge only (first cell) + the row tint —
+   putting the inset on every td would draw a bar at each column boundary. */
+.comp-row.cursor > td:first-child { box-shadow: inset 3px 0 0 0 var(--accent); }
 .comp-row.cursor { background: var(--panel-2); }
 .comp-row.selected { background: rgba(47, 129, 247, 0.14); }
 .comp-row.selected.cursor { background: rgba(47, 129, 247, 0.2); }
@@ -423,7 +425,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .alert-row.prio-ready { --prio: var(--ok); }
 .alert-row.prio-pr { --prio: var(--accent); }
 .alert-row .nav-check { margin-top: 7px; flex: 0 0 auto; }
-.alert-row .ar-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.alert-row .ar-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .ar-l1 { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .ar-name { font-size: 15px; font-weight: 700; word-break: break-word; }
 .ver { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
@@ -452,10 +454,12 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 /* Status rows: label left, action right; a thin colored tick on the row's left edge
    encodes its kind (amber = needs a decision, red = urgent, blue = PR/info, green = ok)
    — replaces the old labeled zone boxes without losing the color coding. */
-.ar-status { margin-top: 7px; display: flex; flex-direction: column; }
-.srow { position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 6px 4px 6px 13px; border-top: 1px solid rgba(255, 255, 255, 0.055); font-size: 13px; }
+/* No extra margin — the body's flex gap + the rows' own padding set the rhythm
+   (keeps the first status row's optical distance close to the l1→l2 spacing). */
+.ar-status { display: flex; flex-direction: column; }
+.srow { position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 5px 4px 5px 13px; border-top: 1px solid rgba(255, 255, 255, 0.055); font-size: 13px; }
 .ar-status > .srow:first-child { border-top: 0; }
-.srow::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--rowbar, var(--border)); }
+.srow::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--rowbar, var(--border)); }
 .srow.warn { --rowbar: var(--medium); }
 .srow.danger, .srow.stale { --rowbar: var(--danger); }
 .srow.pr, .srow.info, .srow.todo { --rowbar: var(--accent); }
@@ -513,8 +517,9 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .fix-all:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 .fix-all:disabled { opacity: 0.6; cursor: default; }
 
-/* Dependency nesting: a dependency is indented under the repo that consumes it */
-.card.nested { border-left: 3px solid var(--accent); }
+/* Dependency nesting: a dependency is indented under the repo that consumes it.
+   The indent + the inline ↳ tag carry the relationship — no border, which would
+   collide with the left-edge priority bar and overload blue (= PR in flight). */
 .nest-label { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
 .nest-label strong { color: var(--text); font-weight: 600; }
 

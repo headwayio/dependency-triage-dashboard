@@ -591,7 +591,7 @@ function drawCompliance() {
     `<div class="comp-tabs" role="tablist">` +
     filters.map(([key, name, n]) => `<button class="comp-tab ${f === key ? "active" : ""}${key === "archived" ? " archived-tab" : ""}" role="tab" data-filter="${key}">${esc(name)} <span class="ct">${n}</span></button>`).join("") +
     `</div>` +
-    `<input class="comp-search" type="text" placeholder="Search…  (/)" value="${esc(STATE.compSearch)}">` +
+    `<input class="comp-search" type="text" placeholder="Search repositories…  (press /)" value="${esc(STATE.compSearch)}">` +
     (q ? `<span class="muted comp-match">${rows.length} match${rows.length === 1 ? "" : "es"}</span>` : "") +
     `</div>` +
     // Row 2: bulk actions — not shown on the Archived view (nothing to triage/protect there).
@@ -2192,7 +2192,10 @@ function hasAttention(r) {
   if (STATE.eol[r.name] && STATE.eol[r.name].length) return true;
   if ((r.classification === "maintained" || r.pending) && STATE.protection[r.name] && STATE.protection[r.name].protected === false) return true;
   if (r.disposition && r.disposition.state === "blocked" && !r.pending) return true;
-  if ((r.classification || "untriaged") === "untriaged") return true;
+  // Being unclassified is the Untriaged tab's whole premise — an amber bar on every
+  // card there distinguishes nothing (same logic as classifyPrompt). Elsewhere
+  // (e.g. an untriaged repo sitting in Pending) it still flags the missing triage.
+  if (STATE.tab !== "untriaged" && (r.classification || "untriaged") === "untriaged") return true;
   if (r.classification === "monitored" && r.notifiedAt && r.newAdvisoryCount > 0) return true;
   return false;
 }
