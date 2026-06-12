@@ -6,14 +6,14 @@ hosted, nothing exposed to the internet, and no tokens to manage for the core
 workflow. (One optional, least-privilege token unlocks GitHub-native alert
 dismissal — see [Credentials & local setup](#credentials--local-setup).)
 
-![The Compliance tab: the full-org SOC 2 inventory with per-repo engagement
-tracking, branch-protection status with one-click protect/unprotect, derived
-audit scope with logged overrides, and archive/delete pruning](docs/compliance-tab.png)
+![The Maintained tab: one remediation card per repo with severity counts,
+one-click update PRs, branch-protection warnings, a blocked-gem constraint-bump
+flow, and an end-of-life runtime upgrade](docs/maintained-tab.png)
 
-*The 🛡 Compliance tab — one row per org repo: how it's tracked (Maintain /
-Monitor / Ignore), whether its default branch enforces the SOC 2 ruleset, and
-its derived audit scope. The alert tabs (Untriaged, Maintained, Pending PR, …)
-hold the per-repo remediation cards. Shown with demo data.*
+*The Maintained tab — one card per repo with its severity counts and the
+remediation that fits: a one-click draft update PR, a branch-protection fix, a
+constraint-bump PR for a blocked gem, or a runtime upgrade off an end-of-life
+version. Shown with demo data.*
 
 For each repository with open alerts it shows the severity breakdown and the exact
 flagged packages, sorts it into a **triage tab** by how you've classified the repo
@@ -383,6 +383,15 @@ commits are deliberately left out of the *uniform* ruleset (required check names
 per repo; signing is high-friction) — adjust the policy in `config.protection`.
 
 ### Compliance tab — the full-org inventory
+
+![The Compliance tab: the full-org SOC 2 inventory with per-repo engagement
+tracking, branch-protection status with one-click protect/unprotect, derived
+audit scope with logged overrides, and archive/delete pruning](docs/compliance-tab.png)
+
+*One row per org repo: how it's tracked (Maintain / Monitor / Ignore), whether
+its default branch enforces the SOC 2 ruleset, and its derived audit scope —
+with logged overrides for the rare exception. Shown with demo data.*
+
 The **🛡 Compliance** tab pulls in **every non-archived org repo** (a single
 `gh repo list`, cached), not just ones with alerts, so each gets a recorded SOC 2 scope
 decision — `needs-compliance` or `out-of-scope` — persisted to `compliance.json` (your
