@@ -336,6 +336,16 @@ recommended"* and the repo returns to **Monitored**.
 
 ## Autonomous loops
 
+![The Pending PR tab: each open update PR with its review state and live CI
+checks — a draft with failing checks offers a one-click Fix CI that launches a
+headless Claude session, next to an approved PR with checks passing](docs/pending-tab.png)
+
+*The Pending PR tab — where opened PRs live until merge. Each card shows the
+PR's review state and live CI checks: the failing one offers **🔧 Fix CI**
+(the headless Claude loop below), the approved one is ready to merge. Bulk
+actions copy every PR link for Slack or open them all in the browser. Shown
+with demo data.*
+
 Three loops can run **unattended**. All ship **off in code** and are turned on by your
 `config.json`; each is independent, capped, and safe to flip off (two have
 a runtime kill-switch that needs no restart). The two Claude-driven loops spawn a
