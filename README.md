@@ -6,6 +6,15 @@ hosted, nothing exposed to the internet, and no tokens to manage for the core
 workflow. (One optional, least-privilege token unlocks GitHub-native alert
 dismissal — see [Credentials & local setup](#credentials--local-setup).)
 
+![The Compliance tab: the full-org SOC 2 inventory with per-repo engagement
+tracking, branch-protection status with one-click protect/unprotect, derived
+audit scope with logged overrides, and archive/delete pruning](docs/compliance-tab.png)
+
+*The 🛡 Compliance tab — one row per org repo: how it's tracked (Maintain /
+Monitor / Ignore), whether its default branch enforces the SOC 2 ruleset, and
+its derived audit scope. The alert tabs (Untriaged, Maintained, Pending PR, …)
+hold the per-repo remediation cards. Shown with demo data.*
+
 For each repository with open alerts it shows the severity breakdown and the exact
 flagged packages, sorts it into a **triage tab** by how you've classified the repo
 (and what kind of project it is), and offers the remediation that fits:
@@ -160,8 +169,8 @@ and without the token the server returns a clear "can't delete" message instead.
 ## Run it
 
 ```bash
-git clone https://github.com/your-github-org/dependency-dashboard.git
-cd dependency-dashboard
+git clone https://github.com/headwayio/dependency-triage-dashboard.git
+cd dependency-triage-dashboard
 npm start              # node --watch: auto-restarts when server.js / lib/*.js change
 # npm run start:once   # plain node, no file watching
 ```
