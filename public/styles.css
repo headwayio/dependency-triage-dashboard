@@ -301,6 +301,14 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .dormant-tag { font-size: 10px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 .c-ok { color: var(--ok, #2ea043); }
 .c-warn { color: var(--danger); }
+/* The protection badges are buttons; each hover tint telegraphs what a click does.
+   🔒 protected → danger tint (click removes our ruleset, rare);
+   🔓 unprotected → green tint (click applies the SOC 2 ruleset, after a confirm). */
+.prot-lock, .prot-open { background: transparent; border: 0; padding: 2px 7px; font: inherit; font-size: 13px; cursor: pointer; border-radius: 6px; white-space: nowrap; }
+.prot-lock { color: var(--ok, #2ea043); }
+.prot-lock:hover { background: var(--danger-bg); color: var(--danger); }
+.prot-open { color: var(--danger); }
+.prot-open:hover { background: var(--ok-bg); color: var(--ok); }
 /* SOC 2 scope: derived read-only badge + the rare override marker / edit affordance. */
 .scope-badge { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 6px; white-space: nowrap; }
 .scope-badge.in { color: var(--accent); background: rgba(47, 129, 247, 0.14); }
@@ -314,8 +322,6 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .scope-opt > span { display: flex; flex-direction: column; gap: 1px; }
 .scope-opt strong { font-size: 13px; font-weight: 600; color: var(--text); }
 .scope-opt em { font-size: 12px; color: var(--muted); font-style: normal; }
-.row-protect { font-size: 12px; padding: 2px 9px; white-space: nowrap; background: var(--medium); border-color: var(--medium); color: #1a1a1a; font-weight: 600; }
-.row-protect:hover:not(:disabled) { background: var(--medium); filter: brightness(1.08); }
 /* Reusable info icon + hover/focus tooltip (column-header explanations). */
 .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border: 1px solid var(--muted); border-radius: 50%; color: var(--muted); font: italic 700 10px/1 Georgia, "Times New Roman", serif; cursor: help; position: relative; vertical-align: middle; }
 .info-icon:hover, .info-icon:focus { color: var(--text); border-color: var(--text); outline: none; }

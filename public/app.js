@@ -631,8 +631,10 @@ function drawCompliance() {
   content.querySelectorAll(".comp-row").forEach((tr) => {
     const se = tr.querySelector(".scope-edit");
     if (se) se.addEventListener("click", (e) => { e.stopPropagation(); onScopeOverride(se.dataset.repo); });
-    const pb = tr.querySelector(".row-protect");
+    const pb = tr.querySelector(".prot-open");
     if (pb) pb.addEventListener("click", () => onRowProtect(tr.dataset.repo, pb));
+    const ul = tr.querySelector(".prot-lock");
+    if (ul) ul.addEventListener("click", () => onRowUnprotect(tr.dataset.repo, ul));
     const ar = tr.querySelector(".row-archive");
     if (ar) ar.addEventListener("click", () => onComplianceArchive(tr.dataset.repo));
     const un = tr.querySelector(".row-unarchive");
@@ -1373,8 +1375,8 @@ function complianceRow(r, idx) {
   // or pending = maintained in-flight). Everything else shows "—" (not applicable).
   let prot = "<span class='muted' title='Branch protection is only enforced on maintained repos'>—</span>";
   if (r.protectionScope) {
-    if (r.protected === true) prot = "<span class='c-ok'>🔒 protected</span>";
-    else if (r.protected === false) prot = `<span class='c-warn'>🔓 unprotected</span> <button class="row-protect">Protect</button>`;
+    if (r.protected === true) prot = `<button class="prot-lock" title="Protected by the SOC 2 ruleset — click to remove it (rare; reversible by re-protecting)">🔒 protected</button>`;
+    else if (r.protected === false) prot = `<button class="prot-open" title="Unprotected — click to apply the SOC 2 ruleset (reviewed PR · no force-push · no deletion)">🔓 unprotected</button>`;
     else prot = "<span class='muted'><span class='spin'></span> checking…</span>";
   }
   // SOC 2 scope is DERIVED from engagement (read-only badge); the ⚙ opens the rare override.
@@ -1411,7 +1413,51 @@ function complianceRow(r, idx) {
   );
 }
 
+// Remove OUR SOC 2 ruleset from a protected repo (the rare undo of Protect). The
+// server refuses protection this tool didn't create; the branch may stay protected
+// by classic protection or a foreign ruleset, and the row reflects whatever remains.
+async function onRowUnprotect(repo, btn) {
+  const ok = await confirmModal({
+    danger: true,
+    confirmLabel: "Remove protection",
+    message:
+      `Remove the SOC 2 branch-protection ruleset from ${repo}?\n\n` +
+      `Its default branch becomes mergeable without a reviewed PR, and force-pushes/deletion are no longer blocked — weakening a SOC 2 change-management control. ` +
+      `Reversible anytime with Protect.`,
+  });
+  if (!ok) return;
+  const restore = btnBusy(btn, '<span class="spin"></span>…');
+  setRowsBusy([repo]);
+  try {
+    const data = await postJSON("/api/unprotect-branch", { repo });
+    const r = STATE.complianceData.repos.find((x) => x.name === repo);
+    if (r) r.protected = data.stillProtected;
+    recomputeComplianceSummary();
+    drawCompliance();
+    toast(
+      data.stillProtected
+        ? `${repo}: removed our ruleset — still protected via ${data.via === "classic" ? "classic branch protection" : "another ruleset"}.`
+        : `${repo}: branch protection removed.`
+    );
+  } catch (e) {
+    clearRowBusy();
+    alert("Couldn't remove protection: " + e.message);
+    restore();
+  }
+}
+
 async function onRowProtect(repo, btn) {
+  const row = STATE.complianceData.repos.find((x) => x.name === repo);
+  const branch = (row && row.defaultBranch) || "the default branch";
+  const ok = await confirmModal({
+    confirmLabel: "Protect branch",
+    message:
+      `Apply the SOC 2 branch-protection ruleset to ${repo}?\n\n` +
+      `Merging into ${branch} will require a pull request with 1 approval; stale approvals are dismissed on new pushes, ` +
+      `conversations must be resolved, and force-pushes & branch deletion are blocked. No one bypasses.\n\n` +
+      `Reversible anytime by clicking the 🔒 badge (or from the repo's Settings → Rules).`,
+  });
+  if (!ok) return;
   const restore = btnBusy(btn, '<span class="spin"></span>…');
   setRowsBusy([repo]); // also covers the keyboard `p` path (no button to spin)
   try {

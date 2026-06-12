@@ -950,6 +950,34 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // Remove OUR SOC 2 ruleset from one repo's default branch (rare; reversible by
+    // re-protecting). Refuses to touch protection this tool didn't create.
+    if (req.method === "POST" && route === "/api/unprotect-branch") {
+      const { repo } = await repoBody(req);
+      if (!modelCache) modelCache = await gh.buildModel(config);
+      let r = modelCache.repos.find((x) => x.name === repo);
+      if (!r) {
+        // Mirror protect-branch: a repo with no open alerts never enters the alert
+        // model — resolve it from the full org inventory instead.
+        const orgRepos = await getOrgRepos();
+        r = orgRepos.find((x) => x.name === repo);
+      }
+      if (!r) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      try {
+        const result = await protection.removeProtection(r.nameWithOwner, r.defaultBranch, config.protection.rulesetName);
+        r.protected = result.stillProtected;
+        if (protectionCache) protectionCache[repo] = { protected: result.stillProtected, via: result.via, ourId: null };
+        return sendJSON(res, 200, { repo, removed: result.removed, stillProtected: result.stillProtected, via: result.via });
+      } catch (e) {
+        if (e.foreign) return sendJSON(res, 409, { error: e.message });
+        const msg = e.message || "ruleset removal failed";
+        const needsAdmin = /Resource not accessible|admin|403|Not Found|404/i.test(msg);
+        return sendJSON(res, needsAdmin ? 403 : 502, {
+          error: needsAdmin ? `Couldn't remove the ruleset — needs admin on ${repo}. ${msg}` : msg,
+        });
+      }
+    }
+
     // Full SOC 2 compliance inventory: every non-archived org repo, its scope DERIVED from
     // engagement (maintained/pending = in, else out) with any per-repo override applied,
     // and branch-protection status for the in-scope, controlled ones.
