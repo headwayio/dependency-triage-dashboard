@@ -184,7 +184,7 @@ let archivedReposCache = null;
 let archivedReposAt = 0;
 async function getArchivedOrgRepos(force) {
   if (archivedReposCache && !force && Date.now() - archivedReposAt < 5 * 60 * 1000) return archivedReposCache;
-  archivedReposCache = await gh.listArchivedOrgRepos(config.org);
+  archivedReposCache = await gh.listOrgRepos(config.org, { archived: true });
   archivedReposAt = Date.now();
   return archivedReposCache;
 }
