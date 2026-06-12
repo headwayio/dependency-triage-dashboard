@@ -416,11 +416,10 @@ function ignoredLiteCard(r) {
     `<div class="ar-body">` +
     `<div class="ar-l1">` +
     `<a class="ar-name" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a>` +
-    (r.visibility ? `<span class="vis">${esc(r.visibility)}</span>` : "") +
     `<span class="badge ignored-tag">ignored</span>` +
     `<span class="muted">· no open alerts</span>` +
     `</div>` +
-    `<div class="ar-l2"><span class="muted">last push ${esc(push)}</span>` +
+    `<div class="ar-l2"><span class="ar-meta">${r.visibility ? esc(r.visibility.toLowerCase()) + " · " : ""}last push ${esc(push)}</span>` +
     `<span class="ar-actions"><button class="row-unignore">Un-ignore</button></span></div>` +
     `</div>`;
   return el;
@@ -1629,19 +1628,23 @@ async function onOpenAllPRs(list, btn) {
   }
 }
 
-function sevBadges(counts) {
-  // Only show severities that are actually present — zero-count badges are just noise.
-  return SEVS.map((s) => {
+// Right-aligned severity cluster on the title row: colored text tokens in a fixed
+// order, so counts line up and scan vertically down the list. Zero counts are omitted.
+function sevTokens(counts) {
+  const toks = SEVS.map((s) => {
     const n = counts[s] || 0;
-    return n ? `<span class="badge ${s}">${n} ${s}</span>` : "";
+    return n ? `<span class="sev ${s}">${n} ${s}</span>` : "";
   }).join("");
+  return toks ? `<span class="ar-sevs">${toks}</span>` : "";
 }
 
-function ecoPills(eco) {
+// Per-ecosystem breakdown, shown inside the flagged-packages disclosure summary
+// (it's a breakdown of that same count, so it lives with it).
+function ecoText(eco) {
   return Object.entries(eco)
     .sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => `<span class="badge pill">${esc(k)} · ${v}</span>`)
-    .join("");
+    .map(([k, v]) => `${esc(k)} ${v}`)
+    .join(" · ");
 }
 
 function pkgTable(pkgs) {
@@ -1794,22 +1797,35 @@ function wireContactForm(r, el) {
   });
 }
 
-// Status line shown near the top of a card (triage prompt / notification trail).
-// Status lines split by zone: a classify/re-notify prompt is an ATTENTION item; a
-// "client notified" trail is a quiet, resting line.
+// One status row: label on the left, optional meta + action right-aligned. `kind`
+// colors the label and the row's left tick (warn/danger/stale/ok/info/todo/pr/muted).
+function srow(kind, labHtml, right = "", meta = "") {
+  const r = (meta ? `<span class="srow-meta">${meta}</span>` : "") + (right || "");
+  return (
+    `<div class="srow ${kind}"><span class="lab ${kind}">${labHtml}</span>` +
+    (r ? `<span class="srow-right">${r}</span>` : "") +
+    `</div>`
+  );
+}
+
+// Status rows near the top of a card (triage prompt / notification trail).
 function classifyPrompt(r) {
+  // On the Untriaged tab the intro + exposed Track-as buttons already say this —
+  // repeating it on every card is noise. Elsewhere (e.g. an untriaged repo sitting
+  // in Pending) the nudge still earns its row.
+  if (STATE.tab === "untriaged") return "";
   return (r.classification || "untriaged") === "untriaged"
-    ? `<div class="srow"><span class="lab todo">○ Not yet classified — choose how to track this repo below</span></div>`
+    ? srow("todo", "○ Not yet classified — choose how to track this repo below")
     : "";
 }
 function monitoredStale(r) {
   return r.classification === "monitored" && r.notifiedAt && r.newAdvisoryCount > 0
-    ? `<div class="srow"><span class="lab stale">⚠ ${r.newAdvisoryCount} new advisor${r.newAdvisoryCount === 1 ? "y" : "ies"} since you notified the client ${relTime(r.notifiedAt)} — re-notify recommended</span></div>`
+    ? srow("stale", `⚠ ${r.newAdvisoryCount} new advisor${r.newAdvisoryCount === 1 ? "y" : "ies"} since you notified the client ${relTime(r.notifiedAt)} — re-notify recommended`)
     : "";
 }
 function monitoredNotified(r) {
   return r.classification === "monitored" && r.notifiedAt && !(r.newAdvisoryCount > 0)
-    ? `<div class="srow"><span class="lab ok">✓ Client notified ${relTime(r.notifiedAt)} — documented</span></div>`
+    ? srow("ok", `✓ Client notified ${relTime(r.notifiedAt)} — documented`)
     : "";
 }
 
@@ -1830,20 +1846,17 @@ function tabIntro() {
   return TAB_INTROS[STATE.tab] || "";
 }
 
-// "Is this repo a dependency of others?" — published publicly and/or relied on
-// by other org repos. Plus the outbound "depends on org repos" axis.
-function depLine(r) {
-  // `published` moved up to the meta line; this keeps only the dependency relationships.
-  // Only real dependency relationships — the "leaf / not a dependency" default was noise
-  // on most cards, so it's dropped.
-  const parts = [];
-  if (r.dependents && r.dependents.length)
-    parts.push(
-      `<span class="dep used">↩ depended on by ${r.dependents.length} org repo${r.dependents.length > 1 ? "s" : ""}: ${esc(r.dependents.join(", "))}</span>`
-    );
+// Dependency relationships as quiet meta-line segments (full list in the title
+// tooltip and the `d` modal when truncated). Only real relationships are shown.
+function depMeta(r) {
+  const fmt = (names) =>
+    names.length > 3 ? `${names.slice(0, 3).join(", ")} +${names.length - 3}` : names.join(", ");
+  const segs = [];
   if (r.dependsOnOrg && r.dependsOnOrg.length)
-    parts.push(`<span class="dep on">→ depends on org: ${esc(r.dependsOnOrg.join(", "))}</span>`);
-  return parts.length ? `<div class="deps">${parts.join("")}</div>` : "";
+    segs.push(`<span class="dep-meta" title="depends on org repos: ${esc(r.dependsOnOrg.join(", "))}">→ depends on ${esc(fmt(r.dependsOnOrg))}</span>`);
+  if (r.dependents && r.dependents.length)
+    segs.push(`<span class="dep-meta" title="depended on by: ${esc(r.dependents.join(", "))}">↩ used by ${esc(fmt(r.dependents))}</span>`);
+  return segs;
 }
 
 // A PR's review status as a small pill. "Review requested" means a reviewer was actually
@@ -1873,11 +1886,10 @@ function prChips(r) {
       const right =
         (i === 0 ? ci.btn : "") +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
-      return (
-        `<div class="srow">` +
-        `<span class="lab pr">🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${reviewBadge(pr)}${ciText}</span>` +
-        `<span class="srow-right">${right}</span>` +
-        `</div>`
+      return srow(
+        "pr",
+        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${reviewBadge(pr)}${ciText}`,
+        right
       );
     })
     .join("");
@@ -1972,12 +1984,12 @@ function eolBadge(r) {
   const findings = STATE.eol[r.name];
   if (!findings || !findings.length) return "";
   return findings
-    .map(
-      (f) =>
-        `<div class="srow">` +
-        `<span class="lab danger">⚠ ${esc(f.id)} <span class="ver">${esc(f.pinned)}</span> is end-of-life${f.eolDate ? ` · ${esc(String(f.eolDate).slice(0, 7))}` : ""} <span class="srow-arrow">→ <span class="ver">${esc(f.target.version)}</span>${f.target.lts ? " LTS" : ""}</span></span>` +
-        `<button class="eol-upgrade-btn" data-id="${esc(f.id)}" title="Open a runtime-upgrade PR: rewrites the pin + regenerates lockfiles under the new version">⬆ Propose upgrade</button>` +
-        `</div>`
+    .map((f) =>
+      srow(
+        "danger",
+        `⚠ ${esc(f.id)} <span class="ver">${esc(f.pinned)}</span> is end-of-life${f.eolDate ? ` · ${esc(String(f.eolDate).slice(0, 7))}` : ""} <span class="srow-arrow">→ <span class="ver">${esc(f.target.version)}</span>${f.target.lts ? " LTS" : ""}</span>`,
+        `<button class="eol-upgrade-btn" data-id="${esc(f.id)}" title="Open a runtime-upgrade PR: rewrites the pin + regenerates lockfiles under the new version">⬆ Propose upgrade</button>`
+      )
     )
     .join("");
 }
@@ -1989,11 +2001,11 @@ function dispoCovered(r) {
   if (!d || d.state !== "covered") return "";
   const ok = (d.ok || []).slice(0, 8).join(", ");
   const consumers = (r.dependents || []).length ? ` · fixed in consumers: ${(r.dependents || []).map(esc).join(", ")}` : "";
-  return (
-    `<div class="srow">` +
-    `<span class="lab ok">✓ Covered upstream — the gemspec already permits the patched versions${ok ? ` (${esc(ok)})` : ""}${consumers}</span>` +
-    `${d.at ? `<span class="srow-meta">resolved ${esc(relTime(d.at))}</span>` : ""}` +
-    `</div>`
+  return srow(
+    "ok",
+    `✓ Covered upstream — the gemspec already permits the patched versions${ok ? ` (${esc(ok)})` : ""}${consumers}`,
+    "",
+    d.at ? `resolved ${esc(relTime(d.at))}` : ""
   );
 }
 function dispoBlockedAlert(r) {
@@ -2001,7 +2013,7 @@ function dispoBlockedAlert(r) {
   if (!d || d.state !== "blocked" || r.pending) return "";
   const n = (d.blocked || []).length;
   const list = (d.blocked || []).slice(0, 6).join("; ");
-  return `<div class="srow"><span class="lab danger">⛔ Constraint blocks ${n} patch(es)${list ? ` — ${esc(list)}` : ""}. Needs a gemspec bump + release.</span></div>`;
+  return srow("danger", `⛔ Constraint blocks ${n} patch(es)${list ? ` — ${esc(list)}` : ""}. Needs a gemspec bump + release.`);
 }
 function dispoBumpNote(r) {
   const d = r.disposition;
@@ -2009,26 +2021,19 @@ function dispoBumpNote(r) {
   const n = (d.blocked || []).length;
   const list = (d.blocked || []).slice(0, 6).join("; ");
   const prNum = r.openPRs && r.openPRs[0] && r.openPRs[0].number ? ` #${r.openPRs[0].number}` : "";
-  return `<div class="srow"><span class="lab info"${list ? ` title="${esc(list)}"` : ""}>🔧 Constraint-bump PR${prNum} raises the gemspec to admit ${n} blocked patch${n === 1 ? "" : "es"} — review &amp; merge.</span></div>`;
+  return srow("info", `<span${list ? ` title="${esc(list)}"` : ""}>🔧 Constraint-bump PR${prNum} raises the gemspec to admit ${n} blocked patch${n === 1 ? "" : "es"} — review &amp; merge.</span>`);
 }
 
-// ---- card body zones --------------------------------------------------------
-// "Needs attention": items requiring a decision/action (each a label + action button).
-function attentionZone(r) {
-  const rows = eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + classifyPrompt(r) + monitoredStale(r);
-  return rows ? `<div class="zone attn"><div class="zone-label">Needs attention</div>${rows}</div>` : "";
-}
-// "Open PR": the in-flight PR (link + review + checks) and the constraint-bump note.
-function prZone(r) {
-  const rows = prChips(r) + dispoBumpNote(r);
-  if (!rows) return "";
-  const bump = r.disposition && r.disposition.state === "blocked" && r.pending;
-  return `<div class="zone prz"><div class="zone-label">Open PR${bump ? " · constraint bump" : ""}</div>${rows}</div>`;
-}
-// Resting/informational rows that need no action and aren't about the PR.
-function quietRows(r) {
-  const rows = depLine(r) + dispoCovered(r) + monitoredNotified(r);
-  return rows ? `<div class="ar-status ar-quiet">${rows}</div>` : "";
+// ---- card status list ---------------------------------------------------------
+// One flat list, ordered by urgency: attention items (amber/red ticks, each with its
+// action button), then the in-flight PR rows (blue), then resting notes (green/muted).
+// The colored left tick per row replaces the old labeled zone boxes.
+function statusRows(r) {
+  const rows =
+    eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + classifyPrompt(r) + monitoredStale(r) +
+    prChips(r) + dispoBumpNote(r) +
+    dispoCovered(r) + monitoredNotified(r);
+  return rows ? `<div class="ar-status">${rows}</div>` : "";
 }
 
 // Branch-protection: warn + offer to apply the SOC 2 ruleset when the default branch
@@ -2039,11 +2044,10 @@ function protectionRow(r) {
   if (r.archived || !(r.classification === "maintained" || r.pending)) return "";
   const st = STATE.protection[r.name];
   if (!st || st.protected !== false) return ""; // unknown or already protected
-  return (
-    `<div class="srow">` +
-    `<span class="lab warn">🔓 <strong>${esc(r.defaultBranch || "default branch")}</strong> is unprotected — it can be merged into without a review</span>` +
-    `<button class="protect-btn" title="Apply the SOC 2 ruleset: require a reviewed PR (1 approval), block force-push & deletion, no bypass">🛡 Protect branch</button>` +
-    `</div>`
+  return srow(
+    "warn",
+    `🔓 <strong>${esc(r.defaultBranch || "default branch")}</strong> is unprotected — it can be merged into without a review`,
+    `<button class="protect-btn" title="Apply the SOC 2 ruleset: require a reviewed PR (1 approval), block force-push & deletion, no bypass">🛡 Protect branch</button>`
   );
 }
 
@@ -2289,8 +2293,17 @@ function card(r, nesting) {
       ? ` <span class="nest-inline" title="dependency of ${esc(nesting.parentName)}">↳ ${esc(nesting.parentName)}</span>`
       : "";
 
-  // Dense 2–3 line row: line 1 name+badges+counts, line 2 meta+actions, then any
-  // status banners + the package disclosure + run-log (all collapse to nothing when empty).
+  // Identity row (name + tags, severity cluster pinned right), meta+actions row,
+  // then the flat status list + package disclosure + run-log (collapse when empty).
+  const metaBits = [
+    r.language ? esc(r.language) : "",
+    r.visibility ? esc(r.visibility.toLowerCase()) : "",
+    `base <code>${esc(r.defaultBranch || "?")}</code>`,
+    esc(relTime(r.pushedAt)),
+    r.published ? `<span class="meta-pub" title="published to ${esc(r.published.registry)}">📦 ${esc(r.published.registry)}</span>` : "",
+    ...depMeta(r),
+  ].filter(Boolean).join('<span class="meta-sep"> · </span>');
+  const eco = ecoText(r.ecosystems);
   el.innerHTML = `
     <input type="checkbox" class="nav-check" aria-label="select ${esc(r.name)}">
     <div class="ar-body">
@@ -2302,18 +2315,15 @@ function card(r, nesting) {
           ? r.pending
             ? '<span class="badge disp-pill fixing" title="A constraint-bump PR is open to raise the gemspec — see below">🔧 bump PR open</span>'
             : '<span class="badge disp-pill blocked" title="A gemspec constraint blocks the patched versions — open a constraint-bump PR below">⛔ blocked</span>'
-          : ""}
-        <span class="ar-eco">${ecoPills(r.ecosystems)}</span>
-        <span class="ar-sev">${sevBadges(r.counts)}</span>${nestInline}
+          : ""}${nestInline}
+        ${sevTokens(r.counts)}
       </div>
       <div class="ar-l2">
-        <span class="ar-meta">${r.language ? esc(r.language) + " · " : ""}${r.visibility ? esc(r.visibility.toLowerCase()) + " · " : ""}base <code>${esc(r.defaultBranch || "?")}</code> · ${esc(relTime(r.pushedAt))}${r.published ? ` · <span class="meta-pub">📦 published ${esc(r.published.registry)}</span>` : ""}</span>
+        <span class="ar-meta">${metaBits}</span>
         <span class="ar-actions">${actionsFor(r)}</span>
       </div>
-      ${quietRows(r)}
-      ${attentionZone(r)}
-      ${prZone(r)}
-      <details class="disclosure ar-detail"><summary>${r.packages.length} flagged package${r.packages.length === 1 ? "" : "s"}</summary>${pkgTable(r.packages)}</details>
+      ${statusRows(r)}
+      <details class="disclosure ar-detail"><summary>${r.packages.length} flagged package${r.packages.length === 1 ? "" : "s"}${eco ? `<span class="eco-sum"> · ${eco}</span>` : ""}</summary>${pkgTable(r.packages)}</details>
       <div class="runlog" id="log-${esc(r.name)}"></div>
     </div>`;
 

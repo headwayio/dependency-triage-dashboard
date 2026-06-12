@@ -210,19 +210,8 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .card.ignored .ar-l1, .card.ignored .ar-status { filter: saturate(0.6); }
 .badge.ignored-tag { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
 
-/* Dependency relationships */
-.deps { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.dep {
-  font-size: 12px;
-  padding: 2px 9px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  background: var(--panel-2);
-}
-.dep.pub { color: var(--ok); border-color: #1f4427; background: #11261a; }
-.dep.used { color: var(--accent); border-color: #1e3a5f; background: #0f1f33; }
-.dep.none { opacity: 0.6; }
+/* Dependency relationships — quiet segments on the card's meta line */
+.dep-meta { white-space: nowrap; }
 
 /* Flash a card that just moved (e.g. into Pending after a PR was opened) */
 @keyframes cardflash {
@@ -429,9 +418,18 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .ar-l1 { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .ar-name { font-size: 15px; font-weight: 700; word-break: break-word; }
 .ver { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
-.ar-eco, .ar-sev { display: inline-flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* Severity cluster — pinned to the title row's right edge so counts scan vertically
+   down the list. Colored text, critical alone keeps a pill for urgency. */
+.ar-sevs { margin-left: auto; display: inline-flex; gap: 11px; align-items: center; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sev { white-space: nowrap; }
+.sev.critical { color: var(--critical); background: var(--critical-bg); border: 1px solid #5a2326; padding: 1px 8px; border-radius: 20px; }
+.sev.high { color: var(--high); }
+.sev.medium { color: var(--medium); }
+.sev.low { color: var(--low); }
 .ar-l2 { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; justify-content: space-between; }
 .ar-meta { font-size: 12px; color: var(--muted); }
+.meta-sep { opacity: 0.55; }
+.eco-sum { color: var(--muted); font-weight: 400; }
 .ar-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .ar-actions .action-row, .ar-actions .classify { margin: 0; }
 .ar-actions button { font-size: 12px; padding: 3px 10px; }
@@ -442,9 +440,17 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .ar-status { display: flex; flex-direction: column; margin-top: 2px; }
 .ar-status:empty { display: none; }
 
-/* Option B status rows: label on the left, its action right-aligned in a column. */
-.srow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 6px 2px; border-top: 1px solid var(--border); font-size: 13px; }
-.ar-status > .srow:first-child { border-top: 0; padding-top: 3px; }
+/* Status rows: label left, action right; a thin colored tick on the row's left edge
+   encodes its kind (amber = needs a decision, red = urgent, blue = PR/info, green = ok)
+   — replaces the old labeled zone boxes without losing the color coding. */
+.ar-status { margin-top: 7px; display: flex; flex-direction: column; }
+.srow { position: relative; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; padding: 6px 4px 6px 13px; border-top: 1px solid rgba(255, 255, 255, 0.055); font-size: 13px; }
+.ar-status > .srow:first-child { border-top: 0; }
+.srow::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--rowbar, var(--border)); }
+.srow.warn { --rowbar: var(--medium); }
+.srow.danger, .srow.stale { --rowbar: var(--danger); }
+.srow.pr, .srow.info, .srow.todo { --rowbar: var(--accent); }
+.srow.ok { --rowbar: var(--ok); }
 .srow .lab { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; }
 .srow .lab.warn { color: var(--medium); }
 .srow .lab.danger { color: var(--danger); }
@@ -468,19 +474,6 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .ci-inline.muted { color: var(--muted); }
 .pr-meta { color: var(--muted); font-size: 12px; }
 .meta-pub { color: var(--ok); }
-.deps { margin-top: 4px; }
-
-/* Card body zones: "needs attention" (action items, amber) vs "open PR" (blue). */
-.zone { border-radius: 9px; padding: 3px 11px; margin-top: 8px; }
-.zone-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; padding-top: 6px; }
-.zone.attn { background: rgba(184, 134, 30, 0.07); box-shadow: inset 2px 0 0 0 rgba(184, 134, 30, 0.5); }
-.zone.attn .zone-label { color: var(--medium); }
-.zone.prz { background: rgba(47, 129, 247, 0.06); box-shadow: inset 2px 0 0 0 rgba(47, 129, 247, 0.5); }
-.zone.prz .zone-label { color: var(--accent); }
-.zone .srow { border-top-color: rgba(255, 255, 255, 0.06); padding: 5px 2px; }
-.zone .zone-label + .srow { border-top: 0; }
-.ar-quiet { margin-top: 4px; }
-.ar-quiet > .srow:first-child { border-top: 0; }
 .nest-inline { font-size: 11px; color: var(--muted); }
 .alert-row .disclosure { margin-top: 2px; }
 /* Keyboard cursor = an accent ring around the card. The priority bar (first shadow) paints
