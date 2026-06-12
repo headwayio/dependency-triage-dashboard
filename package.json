@@ -1,0 +1,18 @@
+{
+  "name": "dependency-dashboard",
+  "version": "1.0.0",
+  "description": "Local triage dashboard for Dependabot alerts across a GitHub org. Runs on your own gh auth. Archive dead repos or open targeted dependency-update PRs.",
+  "author": "Jon Kinney",
+  "license": "MIT",
+  "type": "commonjs",
+  "bin": {
+    "deps-dashboard": "server.js"
+  },
+  "scripts": {
+    "start": "node --watch server.js",
+    "start:once": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

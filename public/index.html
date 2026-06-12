@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Dependency Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="header-row">
+        <h1>Dependency Dashboard <span class="org" id="orgLabel"></span></h1>
+        <div class="spacer"></div>
+        <div class="health">
+          <span class="dot" id="healthDot"></span>
+          <span id="healthText">checking auth…</span>
+        </div>
+        <div class="controls">
+          <button id="settingsBtn" title="Settings">⚙ Settings</button>
+          <button id="helpBtn" class="help-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>
+          <button id="refreshBtn">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="summary" id="summary"></div>
+      <div class="tabs" id="tabs"></div>
+    </header>
+
+    <main>
+      <div id="banner"></div>
+      <div id="content"><div class="loading"><span class="spin"></span>Loading alerts from GitHub…</div></div>
+      <p class="note">
+        Runs locally on your <code>gh</code> auth · bound to localhost only · PRs open as drafts for review.
+      </p>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

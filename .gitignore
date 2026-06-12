@@ -1,0 +1,24 @@
+node_modules/
+.work/
+*.log
+.DS_Store
+.cache/
+.dismiss-token
+.delete-token
+
+# Local config & per-user runtime state (copy the *.example.* templates to start).
+# These hold your org config, contacts, signatures, and client/triage data.
+config.json
+settings.toml
+contacts.json
+compliance.json
+classifications.json
+ignored.json
+dispositions.json
+dismissals.json
+bump-attempts.json
+upgrade-attempts.json
+fix-attempts.json
+notifications.json
+scope-overrides.json
+engagement-log.json

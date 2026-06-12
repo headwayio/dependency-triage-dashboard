@@ -1,0 +1,29 @@
+# Dependency Dashboard — settings
+# Copy this file to settings.toml, then edit here or via the in-app Settings
+# panel (gear icon). settings.toml is gitignored so your local values stay private.
+
+selected_signature = ""
+
+[estimate]
+hourly_rate = 200
+patch_hours = 0.25
+minor_hours = 0.5
+major_hours = 2
+unknown_hours = 0.5
+setup_hours = 1
+low_multiplier = 1.2
+high_multiplier = 1.6
+
+[email]
+mode = "mailto"
+copy_include_address = true
+copy_include_subject = true
+copy_include_signature = true
+
+# Add one or more email signatures. Each gets an id you select via
+# selected_signature above (or pick one in the Settings panel). Example:
+#
+# [[signature]]
+# id = "default"
+# label = "Your Name — Your Title"
+# body = "Your Name\nYour Title\nexample.com\n555-555-5555"
