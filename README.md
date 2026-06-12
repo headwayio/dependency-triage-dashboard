@@ -42,8 +42,8 @@ every trigger and the shared pipeline is in
 ## Prerequisites
 
 - **Node.js ≥ 18** (`node -v`)
-- **GitHub CLI** authenticated: `gh auth status` (needs `repo` + `read:org` scope —
-  your current token already has them)
+- **GitHub CLI** authenticated: `gh auth status` (needs the `repo` + `read:org`
+  scopes — check with `gh auth status`)
 - **git**
 - **Claude Code CLI** (`claude` on your PATH) — only for the autonomous loops: the
   CI auto-fix and gem constraint-bump spawn a headless `claude` session. Nothing
@@ -137,9 +137,30 @@ fine-grained permission to _Read and write_). An **HTTP 422** about
 `dismissed_comment` length actually confirms **write works** — the dashboard caps
 the comment at GitHub's 280-char limit for you.
 
+### 3. Repo-delete token — optional (only for the 🗑 Delete button)
+
+The Compliance tab's **🗑 Delete** permanently deletes a repo on GitHub —
+**irreversible**, unlike Archive. Your `gh` token usually *can't* do this (it
+lacks the scope by design — a deliberate fail-safe), so deletion needs its own
+dedicated token, resolved in this order: `DELETE_GH_TOKEN` env var → a
+git-ignored `.delete-token` file. There is **no** config.json fallback on
+purpose — a delete credential should never live in config.
+
+- **Fine-grained PAT:** Permissions → Repository → **Administration → Read and
+  write** on the repos you'd prune
+- **Classic PAT:** the **`delete_repo`** scope
+
+```bash
+echo 'github_pat_xxxxxxxx' > .delete-token   # git-ignored, read fresh per request
+```
+
+Skip this entirely if you never use Delete — every other action works without it,
+and without the token the server returns a clear "can't delete" message instead.
+
 ## Run it
 
 ```bash
+git clone https://github.com/your-github-org/dependency-dashboard.git
 cd dependency-dashboard
 npm start              # node --watch: auto-restarts when server.js / lib/*.js change
 # npm run start:once   # plain node, no file watching
@@ -187,6 +208,16 @@ appearing afterward sends it back to Monitored.
 ### Archive
 `PATCH /repos/your-org/<repo>` with `archived=true`, after an in-browser
 confirm. Unarchive anytime in the repo's GitHub settings.
+
+### Delete repo (permanent)
+`gh repo delete your-org/<repo> --yes` (`POST /api/delete-repo`), from the
+Compliance tab's 🗑 button or the `#` key. **Irreversible** — the repo, its
+issues, PRs, and history are gone — so it's double-gated: the in-browser modal
+keeps Delete disabled until you type the repo's exact name (GitHub-style), and
+the server re-validates that typed confirmation. It also requires the dedicated
+delete token (see [Credentials](#credentials--local-setup)); without one, the
+request fails closed with instructions rather than falling back to your `gh`
+auth.
 
 ### Create update PR
 1. `gh repo clone your-org/<repo>` (shallow) into `./.work/<repo>`
@@ -368,7 +399,7 @@ git-ignored, so your settings stay local):
 
 | key | default | meaning |
 | --- | --- | --- |
-| `org` | `your-org` | GitHub org to audit |
+| `org` | `your-github-org` | GitHub org to audit |
 | `host` / `port` | `127.0.0.1` / `8787` | local bind (loopback only) |
 | `workDir` | `.work` | where repos are cloned for jobs (git-ignored) |
 | `alertState` | `open` | which Dependabot alerts to pull |
@@ -445,11 +476,15 @@ automatically, this same code can run headless on a schedule (cron/Action).
   (DNS rebinding) **and** any cross-site `Origin` (CSRF) — a malicious web page
   can't fire mutations at your local server.
 - All shell calls use `spawn` with argument arrays (no shell interpolation).
-- Archive and PR creation each require an explicit in-browser confirm.
+- Archive, protect/unprotect, and PR creation each require an explicit
+  in-browser confirm.
+- **Delete repo** is the only irreversible action and is double-gated: a typed
+  confirmation matching the repo name (validated client *and* server side), plus
+  a dedicated delete token your normal `gh` auth deliberately doesn't have.
 - PRs are drafts; pushes use `--force-with-lease`; nothing auto-merges.
 - The autonomous loops are **off by default**, gated per repo class, and
   attempt-capped (2 fixes/commit, 4/repo). Their headless Claude sessions run with
   `--permission-mode auto` inside the disposable `.work/` clone, and commit & push
   **only** to the tool's own `dependency-updates/…` / `runtime-upgrade/…` /
   `gemspec-bump/…` branches — never your default branch.
-- `./.work/` (clones) is git-ignored. Delete it anytime with `trash .work`.
+- `./.work/` (clones) is git-ignored. Delete it anytime with `rm -rf .work`.
