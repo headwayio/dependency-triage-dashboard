@@ -620,6 +620,31 @@ function isLocalHost(req) {
   return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 }
 
+/** Throw an Error carrying an HTTP status; the route catch sends it as JSON. */
+function fail(status, msg) {
+  const e = new Error(msg);
+  e.status = status;
+  throw e;
+}
+
+function assertLocal(req) {
+  if (!isLocalHost(req)) fail(403, "non-local host");
+}
+
+/** The standard mutating-route preamble: local-only guard, JSON body, validated repo. */
+async function repoBody(req) {
+  assertLocal(req);
+  const body = await readBody(req);
+  gh.assertRepoName(body.repo);
+  return body;
+}
+
+/** Resolve a repo from the (lazily built) alert model, or 404. */
+async function repoFromModel(name) {
+  if (!modelCache) modelCache = await gh.buildModel(config);
+  return modelCache.repos.find((x) => x.name === name) || fail(404, `Unknown repo: ${name}`);
+}
+
 // ---- Request handling -------------------------------------------------------
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
@@ -723,7 +748,7 @@ const server = http.createServer(async (req, res) => {
 
     // Runtime kill-switch for auto-fix (no restart needed).
     if (req.method === "POST" && route === "/api/autofix") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
+      assertLocal(req);
       const { enabled } = await readBody(req);
       config.autoFixCI = !!enabled;
       console.log(`  CI auto-fix toggled ${config.autoFixCI ? "ON" : "off"} at runtime.`);
@@ -732,7 +757,7 @@ const server = http.createServer(async (req, res) => {
 
     // Runtime kill-switch for auto-upgrade (no restart needed).
     if (req.method === "POST" && route === "/api/autoupgrade") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
+      assertLocal(req);
       const { enabled } = await readBody(req);
       config.autoUpgradeEOL = !!enabled;
       console.log(`  EOL auto-upgrade toggled ${config.autoUpgradeEOL ? "ON" : "off"} at runtime.`);
@@ -741,9 +766,7 @@ const server = http.createServer(async (req, res) => {
 
     // Manually launch a CI-fix session for one repo's PR (works regardless of autoFixCI).
     if (req.method === "POST" && route === "/api/fix-ci") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo } = await repoBody(req);
       if (!modelCache) modelCache = await gh.buildModel(config);
       const r = modelCache.repos.find((x) => x.name === repo);
       if (!r || !r.pending || !(r.openPRs || []).length) return sendJSON(res, 404, { error: "No open PR for that repo." });
@@ -768,12 +791,8 @@ const server = http.createServer(async (req, res) => {
 
     // Manually open a runtime-upgrade PR for one repo (works regardless of autoUpgradeEOL).
     if (req.method === "POST" && route === "/api/upgrade-runtime") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, id } = await readBody(req);
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const r = modelCache.repos.find((x) => x.name === repo);
-      if (!r) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      const { repo, id } = await repoBody(req);
+      const r = await repoFromModel(repo);
       const findings = eolStatus.get(repo) || r.runtimeEol || [];
       const f = id ? findings.find((x) => x.id === id) : findings[0];
       if (!f) return sendJSON(res, 409, { error: "No end-of-life runtime detected for that repo." });
@@ -786,13 +805,12 @@ const server = http.createServer(async (req, res) => {
     // documented reason. The gem's constraints already permit the patches, so the
     // alerts aren't actionable here; this is the auditable SOC 2 close. Reversible.
     if (req.method === "POST" && route === "/api/dismiss-alerts") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, reason, comment } = await readBody(req);
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const r = modelCache.repos.find((x) => x.name === repo);
-      if (!r) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      const { repo, reason, comment } = await repoBody(req);
+      const r = await repoFromModel(repo);
       const nwo = r.nameWithOwner;
+      // Token lacks Dependabot-alerts scope — used for both the read (list) and write
+      // (PATCH) failure paths; keep them in sync.
+      const needsScopeRe = /security_events|Resource not accessible|HTTP 403|must have/i;
       // Dismissing needs a token with Dependabot-alerts WRITE (classic: security_events;
       // fine-grained: "Dependabot alerts: Read and write"). gh's normal OAuth token often
       // can't get that scope (org OAuth-app limits / keyring quirks), so allow a dedicated,
@@ -826,7 +844,7 @@ const server = http.createServer(async (req, res) => {
       const listed = await run("gh", ["api", `repos/${nwo}/dependabot/alerts?state=open&per_page=100`], ghOpts);
       if (listed.code !== 0) {
         const err = (listed.stderr || listed.stdout || "").slice(0, 300);
-        const needsScope = /security_events|Resource not accessible|HTTP 403|must have/i.test(err);
+        const needsScope = needsScopeRe.test(err);
         return sendJSON(res, needsScope ? 412 : 502, {
           error: needsScope ? "Token can't read this repo's Dependabot alerts." : "Couldn't list alerts: " + err,
           needsScope,
@@ -855,7 +873,7 @@ const server = http.createServer(async (req, res) => {
         else {
           failed++;
           lastErr = (patch.stderr || patch.stdout || "").slice(0, 300);
-          if (/security_events|Resource not accessible|HTTP 403|must have/i.test(lastErr)) needsScope = true;
+          if (needsScopeRe.test(lastErr)) needsScope = true;
         }
         // A permission failure is token-wide, not per-alert — stop after the first
         // so a read-only token returns a clear message fast (no 17 failing PATCHes).
@@ -885,12 +903,8 @@ const server = http.createServer(async (req, res) => {
     // Manually open a constraint-bump PR for a blocked gem (same flow the auto-bump
     // uses). Re-runs the disposition first if we don't have a blocked verdict cached.
     if (req.method === "POST" && route === "/api/bump-constraints") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const r = modelCache.repos.find((x) => x.name === repo);
-      if (!r) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      const { repo } = await repoBody(req);
+      const r = await repoFromModel(repo);
       const d = r.disposition;
       if (!d || d.state !== "blocked") {
         return sendJSON(res, 409, { error: "No blocked-constraint verdict for this repo yet — run an update first so the gem is resolved." });
@@ -910,9 +924,7 @@ const server = http.createServer(async (req, res) => {
 
     // Apply (or update) the SOC 2 branch-protection ruleset to one repo's default branch.
     if (req.method === "POST" && route === "/api/protect-branch") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo } = await repoBody(req);
       if (!modelCache) modelCache = await gh.buildModel(config);
       let r = modelCache.repos.find((x) => x.name === repo);
       if (!r) {
@@ -1007,9 +1019,7 @@ const server = http.createServer(async (req, res) => {
     // the value; null/"" clears it back to the engagement-derived default. Either way the
     // decision is recorded in the engagement audit trail (kind: "scope").
     if (req.method === "POST" && route === "/api/scope-override") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, scope, reason } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo, scope, reason } = await repoBody(req);
       const cls = state.classificationMap();
       const pendingSet = new Set((modelCache ? modelCache.repos : []).filter((r) => r.pending).map((r) => r.name));
       const derived = cls[repo] === "maintained" || pendingSet.has(repo) ? "in" : "out";
@@ -1029,10 +1039,8 @@ const server = http.createServer(async (req, res) => {
     // Client email (fetches the repo's lockfile to classify major/minor/patch)
     if (req.method === "GET" && route === "/api/email") {
       const repo = u.searchParams.get("repo");
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const repoModel = modelCache.repos.find((x) => x.name === repo);
-      if (!repoModel) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      gh.assertRepoName(repo); // GET — no body, so repoBody doesn't apply
+      const repoModel = await repoFromModel(repo);
       const installed = await gh.fetchInstalledVersions(config.org, repo);
       const settings = settingsStore.load();
       const mo = u.searchParams.get("mode"); // one-off override of the configured mode
@@ -1051,7 +1059,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, settingsStore.load());
     }
     if (req.method === "POST" && route === "/api/settings") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
+      assertLocal(req);
       const body = await readBody(req);
       const saved = settingsStore.save(body);
       return sendJSON(res, 200, saved);
@@ -1059,9 +1067,7 @@ const server = http.createServer(async (req, res) => {
 
     // Archive (mutating)
     if (req.method === "POST" && route === "/api/archive") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo } = await repoBody(req);
       const result = await gh.archiveRepo(config.org, repo);
       // reflect in caches: alert model + the compliance inventory (archived repos
       // drop out of listOrgRepos, so prune them so a reload doesn't re-show them).
@@ -1077,9 +1083,7 @@ const server = http.createServer(async (req, res) => {
 
     // Unarchive (mutating) — bring an archived repo back into the active inventory.
     if (req.method === "POST" && route === "/api/unarchive") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo } = await repoBody(req);
       const result = await gh.unarchiveRepo(config.org, repo);
       if (archivedReposCache) archivedReposCache = archivedReposCache.filter((r) => r.name !== repo);
       orgReposAt = 0; // force the active inventory to re-fetch (the repo is active again)
@@ -1090,9 +1094,7 @@ const server = http.createServer(async (req, res) => {
     // confirmation matching the repo name, and a token with delete permission (your gh
     // token usually can't — that's a fail-safe, not a bug).
     if (req.method === "POST" && route === "/api/delete-repo") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, confirm } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo, confirm } = await repoBody(req);
       if (confirm !== repo) return sendJSON(res, 400, { error: "Confirmation text must exactly match the repo name." });
       const tok = resolveDeleteToken();
       const opts = tok ? { env: { ...process.env, GH_TOKEN: tok, GITHUB_TOKEN: tok } } : undefined;
@@ -1119,9 +1121,7 @@ const server = http.createServer(async (req, res) => {
     // Classify a repo's engagement: maintained | monitored | ignored, or
     // null/omitted to clear back to untriaged. Persisted to classifications.json.
     if (req.method === "POST" && route === "/api/classify") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, state: want, note, sowEndDate } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo, state: want, note, sowEndDate } = await repoBody(req);
       const from = state.classificationMap()[repo] || "untriaged";
       const applied = state.setClassification(repo, want);
       const to = applied || "untriaged";
@@ -1154,9 +1154,7 @@ const server = http.createServer(async (req, res) => {
 
     // Per-repo client contact (name + email)
     if (req.method === "POST" && route === "/api/contact") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, name, email } = await readBody(req);
-      gh.assertRepoName(repo);
+      const { repo, name, email } = await repoBody(req);
       const saved = state.setContact(repo, { name, email });
       if (modelCache) {
         const r = modelCache.repos.find((x) => x.name === repo);
@@ -1168,12 +1166,8 @@ const server = http.createServer(async (req, res) => {
     // Notify toggle: record (or clear) that we've emailed the client about this
     // repo, snapshotting the advisories we cited.
     if (req.method === "POST" && route === "/api/notify") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo, clear } = await readBody(req);
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const r = modelCache.repos.find((x) => x.name === repo);
-      if (!r) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      const { repo, clear } = await repoBody(req);
+      const r = await repoFromModel(repo);
       if (clear) {
         state.clearNotified(repo);
         r.notifiedAt = null;
@@ -1191,12 +1185,8 @@ const server = http.createServer(async (req, res) => {
     // job id; progress arrives over /api/events. (No long-lived request stream,
     // so kicking off many at once doesn't exhaust the browser's connection pool.)
     if (req.method === "POST" && route === "/api/update-pr") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
-      const { repo } = await readBody(req);
-      gh.assertRepoName(repo);
-      if (!modelCache) modelCache = await gh.buildModel(config);
-      const repoModel = modelCache.repos.find((x) => x.name === repo);
-      if (!repoModel) return sendJSON(res, 404, { error: `Unknown repo: ${repo}` });
+      const { repo } = await repoBody(req);
+      const repoModel = await repoFromModel(repo);
       const job = startUpdateJob(repoModel);
       return sendJSON(res, 200, { jobId: job.id, repo, status: job.status });
     }
@@ -1204,7 +1194,7 @@ const server = http.createServer(async (req, res) => {
     // Start background update-PR jobs for many repos at once ("Fix All"). The
     // queue caps how many actually run concurrently; the rest wait their turn.
     if (req.method === "POST" && route === "/api/update-all") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
+      assertLocal(req);
       const body = await readBody(req);
       if (!modelCache) modelCache = await gh.buildModel(config);
       const names = Array.isArray(body.repos) ? body.repos : [];
@@ -1236,7 +1226,7 @@ const server = http.createServer(async (req, res) => {
     // server-side (via `open`/`xdg-open`) because a browser would popup-block a
     // loop of window.open() calls. URLs are validated to github.com only.
     if (req.method === "POST" && route === "/api/open-urls") {
-      if (!isLocalHost(req)) return sendJSON(res, 403, { error: "non-local host" });
+      assertLocal(req);
       const body = await readBody(req);
       const urls = (Array.isArray(body.urls) ? body.urls : []).filter(
         (u) => typeof u === "string" && /^https:\/\/github\.com\/[A-Za-z0-9._\-/]+$/.test(u)
@@ -1259,7 +1249,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not found");
   } catch (e) {
-    if (!res.headersSent) sendJSON(res, 500, { error: e.message });
+    if (!res.headersSent) sendJSON(res, e.status || 500, { error: e.message });
     else res.end();
   }
 });
