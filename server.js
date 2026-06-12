@@ -337,11 +337,13 @@ function maybeAutoBump(model) {
   startBumpJob(model, d.blocked || []);
 }
 
-/** Promote queued jobs into running while there's free capacity. */
+/** Promote queued jobs into running while there's free capacity. Fix jobs have
+ *  their own queue/pump (pumpFixQueue) — promoting one here would run it through
+ *  runJob, which treats it as an update and would open a spurious update PR. */
 function pumpQueue() {
   for (const job of jobs.values()) {
     if (runningCount >= MAX_CONCURRENT) break;
-    if (job.status === "queued") runJob(job);
+    if (job.status === "queued" && job.kind !== "fix") runJob(job);
   }
 }
 
