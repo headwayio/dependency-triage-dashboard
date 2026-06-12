@@ -441,7 +441,9 @@ automatically, this same code can run headless on a schedule (cron/Action).
 
 ## Safety
 
-- Binds to loopback only; mutating endpoints reject non-localhost `Host` headers.
+- Binds to loopback only. Mutating endpoints reject non-localhost `Host` headers
+  (DNS rebinding) **and** any cross-site `Origin` (CSRF) — a malicious web page
+  can't fire mutations at your local server.
 - All shell calls use `spawn` with argument arrays (no shell interpolation).
 - Archive and PR creation each require an explicit in-browser confirm.
 - PRs are drafts; pushes use `--force-with-lease`; nothing auto-merges.

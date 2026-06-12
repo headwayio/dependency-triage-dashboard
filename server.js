@@ -629,6 +629,18 @@ function fail(status, msg) {
 
 function assertLocal(req) {
   if (!isLocalHost(req)) fail(403, "non-local host");
+  // The Host check stops DNS rebinding but not CSRF: a malicious page can still
+  // POST to 127.0.0.1 directly. Browsers always attach Origin to cross-site
+  // POSTs, so reject any Origin that isn't ours (same-origin fetches and
+  // non-browser clients like curl send none).
+  const origin = req.headers.origin;
+  if (origin) {
+    let host = null;
+    try { host = new URL(origin).hostname; } catch { /* malformed → reject */ }
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
+      fail(403, "cross-origin request rejected");
+    }
+  }
 }
 
 /** The standard mutating-route preamble: local-only guard, JSON body, validated repo. */
