@@ -17,6 +17,14 @@
   --low-bg: #21262d;
   --ok: #3fb950;
   --danger: #f85149;
+  /* State-pill tints: dark bg + half-alpha border per accent color (the dark-theme
+     pill recipe). One source of truth so the next pill can't mint a fourth blue. */
+  --accent-bg: rgba(47, 129, 247, 0.12);
+  --accent-border: rgba(47, 129, 247, 0.45);
+  --ok-bg: rgba(35, 134, 54, 0.12);
+  --ok-border: rgba(35, 134, 54, 0.5);
+  --danger-bg: rgba(179, 38, 30, 0.12);
+  --danger-border: rgba(179, 38, 30, 0.5);
   --radius: 10px;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
 }
@@ -91,7 +99,7 @@ button.danger:hover { background: #2a181a; }
 
 main { padding: 16px 24px 80px; margin: 0; }
 
-.grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
 
 .card {
   background: var(--panel);
@@ -110,7 +118,6 @@ main { padding: 16px 24px 80px; margin: 0; }
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.disclosure summary { font-variant-numeric: tabular-nums; }
 .badge.critical { color: var(--critical); background: var(--critical-bg); border-color: #5a2326; }
 .badge.high { color: var(--high); background: var(--high-bg); border-color: #5a3a1f; }
 .badge.medium { color: var(--medium); background: var(--medium-bg); border-color: #4a3f1c; }
@@ -120,7 +127,7 @@ main { padding: 16px 24px 80px; margin: 0; }
 .badge.archived-tag { color: var(--medium); background: var(--medium-bg); border-color: #4a3f1c; }
 
 .disclosure { margin-top: 12px; }
-.disclosure summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+.disclosure summary { cursor: pointer; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .disclosure summary:hover { color: var(--text); }
 
 table.pkgs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
@@ -220,21 +227,23 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 }
 .card.flash { animation: cardflash 2s ease; }
 
-/* CI auto-fix controls (the status text itself is now a generic status row) */
+/* CI auto-fix controls (the status text itself is now a generic status row).
+   Colored buttons re-assert their background on :hover — the generic `button:hover`
+   (higher specificity than a single class) would otherwise flip them dark navy. */
 .ci-fix-btn { font-size: 12px; padding: 3px 10px; background: var(--accent); border-color: var(--accent); color: #fff; border-radius: 6px; }
-.ci-fix-btn:hover { filter: brightness(1.08); }
+.ci-fix-btn:hover { background: var(--accent); filter: brightness(1.08); }
 .ci-fixing { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); }
 .ci-capped { font-size: 12px; color: var(--medium); }
 .autofix-toggle.on { color: var(--ok); border-color: var(--ok); }
 
 /* End-of-life runtime upgrade button */
 .eol-upgrade-btn { margin-left: auto; font-size: 12px; padding: 3px 11px; border-radius: 6px; background: var(--danger); border-color: var(--danger); color: #fff; }
-.eol-upgrade-btn:hover { filter: brightness(1.1); }
+.eol-upgrade-btn:hover { background: var(--danger); filter: brightness(1.1); }
 
-/* Gem disposition action buttons (covered → dismiss, blocked → bump) */
-.act-dismiss { background: var(--ok, #2ea043); border-color: var(--ok, #2ea043); color: #fff; }
+/* Gem disposition action buttons (covered → dismiss, blocked → bump). Both render
+   with the .primary class, which out-specifies a single class — so they're accent
+   blue; only the hover-brightness below actually applies. */
 .act-dismiss:hover:not(:disabled) { filter: brightness(1.08); }
-.act-bump { background: var(--danger); border-color: var(--danger); color: #fff; }
 .act-bump:hover:not(:disabled) { filter: brightness(1.1); }
 /* A covered gem rests — de-emphasize like a resolved item (no opacity: keeps the
    ⋯ dropdown fully opaque), and the blocked gem gets a danger spine. */
@@ -242,18 +251,18 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .card.covered .ar-l1, .card.covered .ar-status { filter: saturate(0.75); }
 /* "blocked" is flagged by a line-1 pill + the red banner — no card border (it would
    collide with the cursor's left bar and double up on the banner). */
-.disp-pill.blocked { color: var(--danger); background: var(--danger-bg, rgba(179, 38, 30, 0.12)); border-color: rgba(179, 38, 30, 0.5); }
+.disp-pill.blocked { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
 /* blocked gem WITH its constraint-bump PR already open — remediation in progress, not stuck. */
-.disp-pill.fixing { color: var(--accent); background: rgba(47, 129, 247, 0.12); border-color: rgba(47, 129, 247, 0.5); }
+.disp-pill.fixing { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
 /* Per-PR review status (from GitHub reviewDecision + requested reviewers) */
 .rev-state { font-size: 11px; padding: 1px 8px; border-radius: 12px; border: 1px solid var(--border); white-space: nowrap; }
-.rev-state.requested { color: var(--accent); background: rgba(47, 129, 247, 0.12); border-color: rgba(47, 129, 247, 0.45); }
-.rev-state.approved { color: var(--ok); background: rgba(35, 134, 54, 0.12); border-color: rgba(35, 134, 54, 0.45); }
-.rev-state.changes { color: var(--danger); background: rgba(179, 38, 30, 0.12); border-color: rgba(179, 38, 30, 0.5); }
+.rev-state.requested { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
+.rev-state.approved { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
+.rev-state.changes { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
 
 /* Branch protection: apply button (amber) */
 .protect-btn { margin-left: auto; font-size: 12px; padding: 3px 11px; border-radius: 6px; background: var(--medium, #b3801f); border-color: var(--medium, #b3801f); color: #1a1a1a; font-weight: 600; white-space: nowrap; }
-.protect-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.protect-btn:hover:not(:disabled) { background: var(--medium, #b3801f); filter: brightness(1.08); }
 .protect-btn:disabled { opacity: 0.6; cursor: default; }
 
 /* SOC 2 compliance inventory (Compliance tab) */
@@ -271,10 +280,11 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .comp-actions-row:empty { display: none; }
 .comp-bulk-btn { font-weight: 600; font-size: 12.5px; padding: 5px 11px; }
 .comp-bulk-btn.protect-all { background: var(--medium); border-color: var(--medium); color: #1a1a1a; }
+.comp-bulk-btn.protect-all:hover:not(:disabled) { filter: brightness(1.08); }
 .comp-tab.archived-tab { margin-left: 6px; }
 .comp-note { font-size: 12.5px; color: var(--muted); margin-bottom: 9px; }
-.row-unarchive { font-size: 12px; padding: 2px 9px; color: var(--accent); border-color: rgba(47, 129, 247, 0.4); }
-.row-unarchive:hover:not(:disabled) { background: rgba(47, 129, 247, 0.12); }
+.row-unarchive { font-size: 12px; padding: 2px 9px; color: var(--accent); border-color: var(--accent-border); }
+.row-unarchive:hover:not(:disabled) { background: var(--accent-bg); }
 .track-cell { white-space: nowrap; }
 .track-select { font-size: 12px; padding: 3px 7px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); cursor: pointer; }
 .track-select:hover { border-color: var(--muted); }
@@ -305,7 +315,7 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .scope-opt strong { font-size: 13px; font-weight: 600; color: var(--text); }
 .scope-opt em { font-size: 12px; color: var(--muted); font-style: normal; }
 .row-protect { font-size: 12px; padding: 2px 9px; white-space: nowrap; background: var(--medium); border-color: var(--medium); color: #1a1a1a; font-weight: 600; }
-.row-protect { font-size: 12px; padding: 2px 9px; white-space: nowrap; background: var(--medium); border-color: var(--medium); color: #1a1a1a; font-weight: 600; }
+.row-protect:hover:not(:disabled) { background: var(--medium); filter: brightness(1.08); }
 /* Reusable info icon + hover/focus tooltip (column-header explanations). */
 .info-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border: 1px solid var(--muted); border-radius: 50%; color: var(--muted); font: italic 700 10px/1 Georgia, "Times New Roman", serif; cursor: help; position: relative; vertical-align: middle; }
 .info-icon:hover, .info-icon:focus { color: var(--text); border-color: var(--text); outline: none; }
@@ -318,11 +328,11 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 }
 .info-icon:hover::after, .info-icon:focus::after { opacity: 1; visibility: visible; transform: translateY(0); }
 .gem-tag { font-size: 10px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
-.gem-tag.pub { color: var(--ok, #2ea043); border-color: rgba(35, 134, 54, 0.5); }
-.dep-tag { font-size: 10px; color: var(--accent); background: rgba(31, 111, 235, 0.12); border: 1px solid rgba(31, 111, 235, 0.4); border-radius: 4px; padding: 1px 6px; cursor: help; white-space: nowrap; }
+.gem-tag.pub { color: var(--ok, #2ea043); border-color: var(--ok-border); }
+.dep-tag { font-size: 10px; color: var(--accent); background: var(--accent-bg); border: 1px solid var(--accent-border); border-radius: 4px; padding: 1px 6px; cursor: help; white-space: nowrap; }
 .prune-cell { white-space: nowrap; }
 .row-archive { font-size: 12px; padding: 2px 9px; color: var(--muted); }
-.row-delete { font-size: 12px; padding: 2px 8px; color: var(--danger); border-color: rgba(179, 38, 30, 0.5); }
+.row-delete { font-size: 12px; padding: 2px 8px; color: var(--danger); border-color: var(--danger-border); }
 .row-delete:hover:not(:disabled) { background: var(--danger); color: #fff; border-color: var(--danger); }
 
 /* Custom confirmation modal (replaces window.confirm/prompt) */
@@ -387,12 +397,12 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .eng-hist-sow { font-size: 12px; color: var(--medium); margin-top: 3px; }
 .eng-hist-note { font-size: 12.5px; color: var(--text); margin-top: 3px; white-space: pre-wrap; }
 .hist-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-right: 5px; }
-.hist-kind.scope { color: var(--accent); border-color: rgba(47, 129, 247, 0.4); }
+.hist-kind.scope { color: var(--accent); border-color: var(--accent-border); }
 .comp-search-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .comp-search { flex: 0 1 360px; padding: 7px 11px; font-size: 13px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; color: var(--text); }
 .comp-search::placeholder { color: var(--muted); }
 .comp-search:focus { border-color: var(--accent); outline: none; }
-.comp-selbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; padding: 7px 12px; background: rgba(47, 129, 247, 0.12); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
+.comp-selbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; padding: 7px 12px; background: var(--accent-bg); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
 /* The `display: flex` above overrides the `hidden` attribute's UA `display: none`; restore it. */
 .comp-selbar[hidden] { display: none; }
 .selbar-btn { font-size: 12.5px; padding: 3px 11px; }
@@ -405,7 +415,6 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .comp-row.selected.cursor { background: rgba(47, 129, 247, 0.2); }
 
 /* Dense alert-tab rows (compressed cards) + the shared nav toolbar */
-.grid { gap: 8px; }
 /* Left-edge priority accent, OUTSIDE the border (amber = needs a decision, green = PR
    approved, blue = PR in flight). A box-shadow bar so it sits flush to the card's outer
    edge — the same plane as the cursor ring, not tucked inside the border. */
@@ -501,7 +510,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .toolbar-hint { font-size: 12px; color: var(--muted); }
 .copy-btn.copied, .copy-all.copied { color: var(--ok); border-color: var(--ok); }
 .fix-all { background: var(--accent); border-color: var(--accent); color: #fff; white-space: nowrap; }
-.fix-all:hover:not(:disabled) { filter: brightness(1.08); }
+.fix-all:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 .fix-all:disabled { opacity: 0.6; cursor: default; }
 
 /* Dependency nesting: a dependency is indented under the repo that consumes it */

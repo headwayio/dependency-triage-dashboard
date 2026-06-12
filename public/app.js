@@ -18,6 +18,12 @@ const TABS = [
 ];
 // Tabs that only appear once they hold something (resting/catch-all buckets).
 const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered"]);
+// Engagement (Track-as) states + action labels — MUST match lib/state.js VALID (the
+// /api/classify contract). NOTE: TABS above intentionally uses different display text
+// ("Maintained" vs "Maintain"); do not derive one from the other.
+const ENGAGEMENTS = [["maintained", "Maintain"], ["monitored", "Monitor"], ["ignored", "Ignore"]];
+const ENG_LABEL = Object.fromEntries(ENGAGEMENTS);
+const ENG_RANK = Object.fromEntries(ENGAGEMENTS.map(([k], i) => [k, i]));
 // The Compliance tab is its own full-org inventory (not driven by the alert model).
 let STATE = { model: null, tab: "maintained", maxConcurrent: 3, ciStatus: {}, autoFixCI: false, maxAttempts: 2, eol: {}, autoUpgradeEOL: false, protection: {}, complianceData: null, complianceFilter: lsGet("compliance.filter", "all"), compSearch: lsGet("compliance.search", ""), compSort: { key: lsGet("compliance.sortKey", ""), dir: Number(lsGet("compliance.sortDir", "1")) || 1 }, alertSearch: "", compRows: [], compCursor: 0, compSelected: new Set() };
 // Background update jobs, keyed by repo. Progress arrives over the global
@@ -40,6 +46,36 @@ function relTime(iso) {
   if (Math.abs(days) < 30) return rtf.format(-days, "day");
   if (Math.abs(days) < 365) return rtf.format(-Math.round(days / 30), "month");
   return rtf.format(-Math.round(days / 365), "year");
+}
+
+// POST JSON to an API route; resolves the parsed response body. On a non-OK response
+// throws an Error carrying .status and .data (parsed error body) so call sites can
+// branch on e.g. the 412 needsScope replies without re-rolling fetch boilerplate.
+async function postJSON(url, body) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.error || `server returned ${res.status}`);
+    e.status = res.status;
+    e.data = data;
+    throw e;
+  }
+  return data;
+}
+
+// GET an API route as JSON. Unlike the old inline `(await fetch(u)).json()` idiom this
+// checks res.ok, so pollers keep their previous state on an error response instead of
+// clobbering it with an error body's empty fields.
+async function getJSON(url) {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const e = new Error(data.error || `server returned ${res.status}`);
+    e.status = res.status;
+    e.data = data;
+    throw e;
+  }
+  return data;
 }
 
 // ---- custom confirmation modal ---------------------------------------------
@@ -151,7 +187,7 @@ function summaryOf(list) {
 // ---- health -----------------------------------------------------------------
 async function loadHealth() {
   try {
-    const h = await (await fetch("/api/health")).json();
+    const h = await getJSON("/api/health");
     $("#orgLabel").textContent = "· " + (h.org || "");
     const dot = $("#healthDot");
     if (h.ok) {
@@ -177,7 +213,7 @@ async function loadRepos(refresh) {
     }</div>`;
   }
   try {
-    const model = await (await fetch("/api/repos" + (refresh ? "?refresh=1" : ""))).json();
+    const model = await getJSON("/api/repos" + (refresh ? "?refresh=1" : ""));
     if (model.error) throw new Error(model.error);
     STATE.model = model;
     render();
@@ -380,18 +416,7 @@ function renderCards() {
     b.addEventListener("click", (e) => { e.stopPropagation(); onUnignore(e.currentTarget.closest("[data-repo]").dataset.repo); })
   );
   bar.querySelectorAll(".comp-selbar [data-kb]").forEach((b) => b.addEventListener("click", () => navAction(b.dataset.kb)));
-  const search = bar.querySelector(".comp-search");
-  if (search) {
-    search.addEventListener("input", () => { STATE.alertSearch = search.value; STATE.compCursor = 0; STATE._refocusSearch = true; renderCards(); });
-    search.addEventListener("keydown", (ev) => {
-      // First Esc just blurs back to the list (keeps the term + filter); a second Esc
-      // within 800ms clears the term (handled globally in navKeydown). stopPropagation so
-      // THIS keypress doesn't also reach the global handler after the synchronous blur.
-      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); STATE._refocusSearch = false; search.blur(); armSearchEsc(); }
-      else if (ev.key === "Enter") { ev.preventDefault(); search.blur(); }
-    });
-    if (STATE._refocusSearch) { STATE._refocusSearch = false; search.focus(); const v = search.value; search.value = ""; search.value = v; }
-  }
+  wireSearch(bar, (v) => { STATE.alertSearch = v; }, renderCards); // term is ephemeral (cleared on tab switch)
   reattachJobs(); // restore live logs for any in-flight update jobs
   scrollCursorIntoView();
 }
@@ -428,8 +453,7 @@ function ignoredLiteCard(r) {
 // Un-ignore → clear the classification (back to untriaged); the repo then leaves this tab.
 async function onUnignore(repo) {
   try {
-    const res = await fetch("/api/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, state: "" }) });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `server ${res.status}`);
+    await postJSON("/api/classify", { repo, state: "" });
     STATE.compSelected.delete(repo);
     await loadComplianceData(); // refresh the inventory; renderTabs + (since on Ignored) re-render
     toast(`${repo} un-ignored → untriaged.`);
@@ -460,7 +484,7 @@ async function loadComplianceData(refresh) {
   if (_compLoading && !refresh) return;
   _compLoading = true;
   try {
-    const data = await (await fetch("/api/compliance" + (refresh ? "?refresh=1" : ""))).json();
+    const data = await getJSON("/api/compliance" + (refresh ? "?refresh=1" : ""));
     if (data.error) throw new Error(data.error);
     STATE.complianceData = data;
     renderTabs(); // badge updates even if we're on another tab
@@ -480,7 +504,7 @@ function scheduleCompliancePoll() {
   _compTimer = setTimeout(async () => {
     _compTimer = null;
     try {
-      const data = await (await fetch("/api/compliance")).json();
+      const data = await getJSON("/api/compliance");
       STATE.complianceData = data;
       if (STATE.tab === "compliance") drawCompliance();
       if (data.protectionPending || data.enrichPending) scheduleCompliancePoll();
@@ -498,7 +522,7 @@ function rankIn(map, val, dflt) {
 function compSortValue(r, key) {
   if (key === "name") return (r.name || "").toLowerCase();
   if (key === "push") return r.pushedAt ? Date.parse(r.pushedAt) || 0 : 0;
-  if (key === "track") return rankIn({ maintained: 0, monitored: 1, ignored: 2 }, r.classification, 3);
+  if (key === "track") return rankIn(ENG_RANK, r.classification, ENGAGEMENTS.length); // untriaged/unknown sorts last
   if (key === "scope") return rankIn({ in: 0, out: 1 }, r.scope, 2);
   if (key === "prot") {
     if (!r.protectionScope) return 3; // not applicable ("—")
@@ -618,7 +642,7 @@ function drawCompliance() {
     const eb = tr.querySelector(".eng-badge");
     if (eb) eb.addEventListener("click", (e) => { e.stopPropagation(); showEngagementHistory(eb.dataset.eng); });
     const dl = tr.querySelector(".row-delete");
-    if (dl) dl.addEventListener("click", () => onComplianceDelete(tr.dataset.repo));
+    if (dl) dl.addEventListener("click", () => genericDelete(tr.dataset.repo));
     const cb = tr.querySelector(".nav-check");
     if (cb) cb.addEventListener("click", (e) => { e.stopPropagation(); setCursor(Number(tr.dataset.idx)); toggleSelectName(tr.dataset.repo); });
     // clicking anywhere else on the row just moves the cursor there
@@ -628,28 +652,7 @@ function drawCompliance() {
   const checkAll = content.querySelector(".comp-check-all");
   if (checkAll) checkAll.addEventListener("click", () => selectAllToggle());
   syncSelectAll();
-  const search = content.querySelector(".comp-search");
-  if (search) {
-    search.addEventListener("input", () => {
-      STATE.compSearch = search.value;
-      lsSet("compliance.search", STATE.compSearch);
-      STATE.compCursor = 0;
-      STATE._refocusSearch = true;
-      drawCompliance();
-    });
-    search.addEventListener("keydown", (ev) => {
-      // First Esc blurs back to the list (keeps the term); second Esc within 800ms clears it.
-      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); STATE._refocusSearch = false; search.blur(); armSearchEsc(); }
-      else if (ev.key === "Enter") { ev.preventDefault(); search.blur(); } // back to nav, cursor on first match
-    });
-    if (STATE._refocusSearch) {
-      STATE._refocusSearch = false;
-      search.focus();
-      const v = search.value; // bounce to put the caret at the end
-      search.value = "";
-      search.value = v;
-    }
-  }
+  wireSearch(content, (v) => { STATE.compSearch = v; lsSet("compliance.search", v); }, drawCompliance);
   scrollCursorIntoView();
 }
 
@@ -664,12 +667,21 @@ function cssEscape(s) {
 }
 function setRowsBusy(names) {
   (names || []).forEach((n) => {
-    const row = document.querySelector(`.nav-row[data-repo="${cssEscape(n)}"]`);
+    const row = compRowEl(n);
     if (row) row.classList.add("busy");
   });
 }
 function clearRowBusy() {
   document.querySelectorAll(".nav-row.busy").forEach((el) => el.classList.remove("busy"));
+}
+// Disable a button and show a busy label; returns a restore fn for failure paths.
+// Captures the rendered label so restores can't drift from what render() drew.
+function btnBusy(btn, busyHtml) {
+  if (!btn) return () => {};
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = busyHtml;
+  return () => { btn.disabled = false; btn.textContent = prev; };
 }
 function selectedOrCursor() {
   if (STATE.compSelected.size) return (STATE.compRows || []).filter((r) => STATE.compSelected.has(r.name)).map((r) => r.name);
@@ -677,8 +689,7 @@ function selectedOrCursor() {
   return r ? [r.name] : [];
 }
 function compRowEl(name) {
-  const sel = window.CSS && CSS.escape ? CSS.escape(name) : name.replace(/"/g, '\\"');
-  return document.querySelector(`.nav-row[data-repo="${sel}"]`);
+  return document.querySelector(`.nav-row[data-repo="${cssEscape(name)}"]`);
 }
 function setCursor(idx) {
   const n = (STATE.compRows || []).length;
@@ -800,11 +811,9 @@ async function kbArchive() {
   setRowsBusy(names);
   for (const name of names) {
     try {
-      const res = await fetch("/api/archive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo: name }) });
-      if (res.ok) {
-        STATE.complianceData.repos = STATE.complianceData.repos.filter((r) => r.name !== name);
-        STATE.compSelected.delete(name);
-      }
+      await postJSON("/api/archive", { repo: name });
+      STATE.complianceData.repos = STATE.complianceData.repos.filter((r) => r.name !== name);
+      STATE.compSelected.delete(name);
     } catch {
       /* keep going */
     }
@@ -830,10 +839,7 @@ async function genericDelete(repo) {
   if (!ok) return;
   setRowsBusy([repo]);
   try {
-    const res = await fetch("/api/delete-repo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, confirm: repo }) });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 412 && data.needsScope) { clearRowBusy(); alert(data.error); return; }
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    await postJSON("/api/delete-repo", { repo, confirm: repo });
     if (STATE.complianceData) {
       STATE.complianceData.repos = STATE.complianceData.repos.filter((x) => x.name !== repo);
       if (STATE.complianceData.archived) STATE.complianceData.archived = STATE.complianceData.archived.filter((x) => x.name !== repo);
@@ -844,6 +850,8 @@ async function genericDelete(repo) {
     else render();
   } catch (e) {
     clearRowBusy();
+    // 412 = the token lacks delete permission; the server's message says how to fix it.
+    if (e.status === 412 && e.data && e.data.needsScope) { alert(e.message); return; }
     alert("Couldn't delete: " + e.message);
   }
 }
@@ -860,8 +868,8 @@ async function kbArchiveAlert() {
   setRowsBusy(repos.map((r) => r.name));
   for (const r of repos) {
     try {
-      const res = await fetch("/api/archive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo: r.name }) });
-      if (res.ok && STATE.model) { const m = STATE.model.repos.find((x) => x.name === r.name); if (m) m.archived = true; STATE.compSelected.delete(r.name); }
+      await postJSON("/api/archive", { repo: r.name });
+      if (STATE.model) { const m = STATE.model.repos.find((x) => x.name === r.name); if (m) m.archived = true; STATE.compSelected.delete(r.name); }
     } catch {
       /* keep going */
     }
@@ -907,7 +915,7 @@ async function kbTrack(toState) {
   setRowsBusy(changing);
   for (const name of changing) {
     try {
-      await fetch("/api/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo: name, state: toState, note: meta.note, sowEndDate: meta.sowEndDate }) });
+      await postJSON("/api/classify", { repo: name, state: toState, note: meta.note, sowEndDate: meta.sowEndDate });
     } catch {
       /* keep going */
     }
@@ -969,7 +977,7 @@ function kbDependencies() {
   confirmModal({ title: `Dependencies — ${r.nameWithOwner || r.name}`, html, confirmLabel: "Close", cancelLabel: null });
 }
 function engagementLabel(s) {
-  return { maintained: "Maintain", monitored: "Monitor", ignored: "Ignore" }[s] || "Untriaged";
+  return ENG_LABEL[s] || "Untriaged"; // "Untriaged" fallback is used for from-states in audit badges
 }
 function engDate(iso) {
   try { return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }); } catch { return iso || ""; }
@@ -1021,7 +1029,7 @@ function engagementNoteModal({ subject, from, to }) {
 // Read-only timeline of a repo's engagement changes (newest first).
 async function showEngagementHistory(repo) {
   let log = [];
-  try { log = (await (await fetch("/api/engagement-log?repo=" + encodeURIComponent(repo))).json()).log || []; } catch { /* show empty */ }
+  try { log = (await getJSON("/api/engagement-log?repo=" + encodeURIComponent(repo))).log || []; } catch { /* show empty */ }
   // Entries are either engagement (Track-as) changes or scope-override changes.
   const lbl = (e, v) => (e.kind === "scope" ? (v === "in" ? "In scope" : "Out of scope") : engagementLabel(v));
   const rows = log
@@ -1104,9 +1112,7 @@ async function onScopeOverride(repo) {
   if (meta === null) return;
   setRowsBusy([repo]);
   try {
-    const res = await fetch("/api/scope-override", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, scope: meta.scope, reason: meta.reason }) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "failed");
+    const data = await postJSON("/api/scope-override", { repo, scope: meta.scope, reason: meta.reason });
     toast(`${repo}: ${data.scope === "in" ? "In scope" : "Out of scope"}${data.override ? " (override)" : " (auto)"}.`);
     loadComplianceData();
   } catch (e) {
@@ -1182,6 +1188,27 @@ function tabActionKeys() {
 // when the search matched nothing (0 rows).
 function armSearchEsc() {
   STATE._searchBlurAt = Date.now();
+}
+// Wire a tab's .comp-search input. setTerm stores the term (and persists it if the tab
+// wants that); redraw repaints the tab. Coordinates with navKeydown's two-stage Esc.
+function wireSearch(root, setTerm, redraw) {
+  const search = root.querySelector(".comp-search");
+  if (!search) return;
+  search.addEventListener("input", () => { setTerm(search.value); STATE.compCursor = 0; STATE._refocusSearch = true; redraw(); });
+  search.addEventListener("keydown", (ev) => {
+    // First Esc just blurs back to the list (keeps the term + filter); a second Esc
+    // within 800ms clears the term (handled globally in navKeydown). stopPropagation so
+    // THIS keypress doesn't also reach the global handler after the synchronous blur.
+    if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); STATE._refocusSearch = false; search.blur(); armSearchEsc(); }
+    else if (ev.key === "Enter") { ev.preventDefault(); search.blur(); } // back to nav, cursor on first match
+  });
+  if (STATE._refocusSearch) {
+    STATE._refocusSearch = false;
+    search.focus();
+    const v = search.value; // bounce to put the caret at the end
+    search.value = "";
+    search.value = v;
+  }
 }
 function currentSearchTerm() {
   return (STATE.tab === "compliance" ? STATE.compSearch : STATE.alertSearch) || "";
@@ -1292,9 +1319,7 @@ async function onComplianceClassify(repo, stateWanted) {
   if (!meta) { drawCompliance(); return; } // cancelled → re-render to reset the <select>
   setRowsBusy([repo]);
   try {
-    const res = await fetch("/api/classify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo, state: stateWanted, note: meta.note, sowEndDate: meta.sowEndDate }) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "failed");
+    const data = await postJSON("/api/classify", { repo, state: stateWanted, note: meta.note, sowEndDate: meta.sowEndDate });
     toast(`${repo} tracked as ${engagementLabel(data.state)}.`);
     loadComplianceData(); // re-derive scope/protection with the new classification (clears busy on re-render)
   } catch (e) {
@@ -1307,9 +1332,7 @@ async function onComplianceUnarchive(repo) {
   if (!(await confirmModal({ message: `Unarchive ${repo}?\n\nIt becomes writable again and re-enters the active inventory and dependency/compliance scans.`, confirmLabel: "↩ Unarchive" }))) return;
   setRowsBusy([repo]);
   try {
-    const res = await fetch("/api/unarchive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ repo }) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "failed");
+    await postJSON("/api/unarchive", { repo });
     if (STATE.complianceData.archived) STATE.complianceData.archived = STATE.complianceData.archived.filter((r) => r.name !== repo);
     drawCompliance();
     renderTabs();
@@ -1324,48 +1347,11 @@ async function onComplianceArchive(repo) {
   if (!(await confirmModal({ message: `Archive ${repo} on GitHub?\n\nIt becomes read-only and drops out of the active inventory (and GitHub's alert feed). Reversible anytime from the repo's settings.`, confirmLabel: "Archive", rememberKey: "archive" }))) return;
   setRowsBusy([repo]);
   try {
-    const res = await fetch("/api/archive", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "failed");
+    await postJSON("/api/archive", { repo });
     removeComplianceRepo(repo);
   } catch (e) {
     clearRowBusy();
     alert("Couldn't archive: " + e.message);
-  }
-}
-
-async function onComplianceDelete(repo) {
-  // GitHub-style gate: the Delete button stays disabled until the typed name matches
-  // the repo exactly (the modal enforces it; the server re-validates too).
-  const ok = await confirmModal({
-    message: `⚠️ PERMANENTLY DELETE "${repo}" on GitHub?\n\nThis is irreversible — the repo, its issues, PRs, and history are gone.`,
-    danger: true,
-    confirmLabel: "Delete this repository",
-    requireMatch: repo,
-  });
-  if (!ok) return;
-  setRowsBusy([repo]);
-  try {
-    const res = await fetch("/api/delete-repo", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo, confirm: repo }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 412 && data.needsScope) {
-      clearRowBusy();
-      alert(data.error);
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
-    removeComplianceRepo(repo);
-  } catch (e) {
-    clearRowBusy();
-    alert("Couldn't delete: " + e.message);
   }
 }
 
@@ -1405,7 +1391,7 @@ function complianceRow(r, idx) {
   const track =
     `<select class="track-select" aria-label="track ${esc(r.name)}">` +
     `<option value=""${cur ? "" : " selected"} disabled hidden>Track as…</option>` +
-    [["maintained", "Maintain"], ["monitored", "Monitor"], ["ignored", "Ignore"]].map(([v, l]) => `<option value="${v}"${cur === v ? " selected" : ""}>${l}</option>`).join("") +
+    ENGAGEMENTS.map(([v, l]) => `<option value="${v}"${cur === v ? " selected" : ""}>${l}</option>`).join("") +
     `</select>`;
   // Latest engagement-change note (the SOC 2 audit trail) — click for full history.
   const eng = r.engagement;
@@ -1426,16 +1412,10 @@ function complianceRow(r, idx) {
 }
 
 async function onRowProtect(repo, btn) {
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>…'; }
+  const restore = btnBusy(btn, '<span class="spin"></span>…');
   setRowsBusy([repo]); // also covers the keyboard `p` path (no button to spin)
   try {
-    const res = await fetch("/api/protect-branch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "failed");
+    await postJSON("/api/protect-branch", { repo });
     const r = STATE.complianceData.repos.find((x) => x.name === repo);
     if (r) r.protected = true;
     recomputeComplianceSummary();
@@ -1443,7 +1423,7 @@ async function onRowProtect(repo, btn) {
   } catch (e) {
     clearRowBusy();
     alert("Couldn't protect: " + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = "Protect"; }
+    restore();
   }
 }
 
@@ -1454,12 +1434,9 @@ async function onComplianceProtectAll(btn) {
   let done = 0;
   for (const r of targets) {
     try {
-      const res = await fetch("/api/protect-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: r.name }),
-      });
-      if (res.ok) { r.protected = true; done++; }
+      await postJSON("/api/protect-branch", { repo: r.name });
+      r.protected = true;
+      done++;
     } catch {
       /* keep going */
     }
@@ -1500,7 +1477,7 @@ function afterMutation(el) {
 // Highlight a repo's card (e.g. the one that just moved to Pending) and bring it
 // into view — it may be far down the sorted list.
 function flashCard(name) {
-  const card = document.querySelector(`.card[data-repo="${CSS.escape(name)}"]`);
+  const card = cardEl(name);
   if (!card) return;
   card.scrollIntoView({ block: "center", behavior: "smooth" });
   card.classList.remove("flash");
@@ -1608,22 +1585,13 @@ async function onOpenAllPRs(list, btn) {
   for (const r of list) for (const pr of r.openPRs || []) if (pr.url) urls.push(pr.url);
   if (!urls.length) return;
   if (urls.length > 5 && !(await confirmModal({ message: `Open all ${urls.length} pull requests as new browser tabs?`, confirmLabel: "Open all" }))) return;
-  const prev = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Opening…";
+  const restore = btnBusy(btn, "Opening…");
   try {
-    const res = await fetch("/api/open-urls", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await postJSON("/api/open-urls", { urls });
     btn.textContent = `✓ Opened ${data.opened}`;
-    setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 2000);
+    setTimeout(restore, 2000);
   } catch (e) {
-    btn.textContent = prev;
-    btn.disabled = false;
+    restore();
     alert("Couldn't open the PRs: " + e.message);
   }
 }
@@ -1674,10 +1642,9 @@ function actionsFor(r) {
   // live in the "⋯" menu.
   let classifyRow = "";
   if (STATE.tab === "untriaged") {
-    const opts = [["maintained", "Maintain"], ["monitored", "Monitor"], ["ignored", "Ignore"]];
     classifyRow =
       `<div class="classify"><span class="classify-label">Track as</span>` +
-      opts.map(([st, lbl]) => `<button class="cls-btn" data-state="${st}">${lbl}</button>`).join("") +
+      ENGAGEMENTS.map(([st, lbl]) => `<button class="cls-btn" data-state="${st}">${lbl}</button>`).join("") +
       `</div>`;
   }
 
@@ -1733,10 +1700,9 @@ function moreMenu(r, c, mode) {
 
   let clsItems = "";
   if (STATE.tab !== "untriaged") {
-    const opts = [["maintained", "Maintain"], ["monitored", "Monitor"], ["ignored", "Ignore"]];
     clsItems =
       `<div class="menu-section">Track as</div>` +
-      opts
+      ENGAGEMENTS
         .map(([st, lbl]) => {
           const cur = c === st;
           return `<button class="cls-opt${cur ? " active" : ""}" data-state="${st}"${cur ? " disabled" : ""}>${cur ? "✓ " : ""}${lbl}</button>`;
@@ -1777,13 +1743,7 @@ function wireContactForm(r, el) {
     const btn = form.querySelector(".contact-save");
     btn.disabled = true;
     try {
-      const res = await fetch("/api/contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: r.name, name, email }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "failed");
+      const data = await postJSON("/api/contact", { repo: r.name, name, email });
       r.contact = data.contact;
       form.hidden = true;
       btn.disabled = false;
@@ -1922,8 +1882,7 @@ function ciInline(r) {
 
 async function pollPRStatus(refresh) {
   try {
-    const res = await fetch("/api/pr-status" + (refresh ? "?refresh=1" : ""));
-    const data = await res.json();
+    const data = await getJSON("/api/pr-status" + (refresh ? "?refresh=1" : ""));
     STATE.ciStatus = data.statuses || {};
     STATE.autoFixCI = !!data.autoFixCI;
     renderAutoFixToggle();
@@ -2053,8 +2012,7 @@ function protectionRow(r) {
 
 async function pollProtectionStatus(refresh) {
   try {
-    const res = await fetch("/api/protection-status" + (refresh ? "?refresh=1" : ""));
-    const data = await res.json();
+    const data = await getJSON("/api/protection-status" + (refresh ? "?refresh=1" : ""));
     STATE.protection = data.protection || {};
     const snap = JSON.stringify(STATE.protection);
     if (snap !== STATE._protSnap) {
@@ -2078,29 +2036,21 @@ async function onProtectBranch(r, el) {
     }))
   )
     return;
-  const btn = el.querySelector(".protect-btn");
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Protecting…'; }
+  const restore = btnBusy(el.querySelector(".protect-btn"), '<span class="spin"></span>Protecting…');
   try {
-    const res = await fetch("/api/protect-branch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    await postJSON("/api/protect-branch", { repo: r.name });
     STATE.protection[r.name] = { protected: true, via: "ruleset" };
     r.protected = true;
     scheduleRender();
   } catch (e) {
     alert("Couldn't protect the branch: " + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = "🛡 Protect branch"; }
+    restore();
   }
 }
 
 async function pollEolStatus(refresh) {
   try {
-    const res = await fetch("/api/eol-status" + (refresh ? "?refresh=1" : ""));
-    const data = await res.json();
+    const data = await getJSON("/api/eol-status" + (refresh ? "?refresh=1" : ""));
     STATE.eol = data.eol || {};
     STATE.autoUpgradeEOL = !!data.autoUpgradeEOL;
     const snap = JSON.stringify(STATE.eol);
@@ -2120,13 +2070,7 @@ async function onUpgradeRuntime(r, id) {
   JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: "⏳ Starting runtime upgrade…", level: "info" }] });
   reattachJobs();
   try {
-    const res = await fetch("/api/upgrade-runtime", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name, id }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await postJSON("/api/upgrade-runtime", { repo: r.name, id });
     const job = JOBS.get(r.name) || { events: [] };
     job.jobId = data.jobId;
     job.status = data.status || "queued";
@@ -2151,24 +2095,12 @@ async function onDismissAlerts(r, el) {
     }))
   )
     return;
-  const btn = el.querySelector(".act-dismiss");
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Dismissing…'; }
+  const restore = btnBusy(el.querySelector(".act-dismiss"), '<span class="spin"></span>Dismissing…');
   try {
-    const res = await fetch("/api/dismiss-alerts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 412 && data.needsScope) {
-      alert(`Your gh token can read alerts but can't dismiss them yet.\n\nRun this once in your terminal, then click Dismiss again:\n\n    ${data.hint}`);
-      if (btn) { btn.disabled = false; btn.textContent = "✓ Dismiss on GitHub"; }
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await postJSON("/api/dismiss-alerts", { repo: r.name });
     if (data.failed) {
       alert(`Dismissed ${data.dismissed} of ${data.total}; ${data.failed} failed.\n${data.error || ""}`);
-      if (btn) { btn.disabled = false; btn.textContent = "✓ Dismiss on GitHub"; }
+      restore();
       return;
     }
     // All alerts dismissed → the repo has no open alerts left; drop it from the board.
@@ -2176,8 +2108,12 @@ async function onDismissAlerts(r, el) {
     if (idx >= 0) STATE.model.repos.splice(idx, 1);
     scheduleRender();
   } catch (e) {
-    alert("Couldn't dismiss the alerts: " + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = "✓ Dismiss on GitHub"; }
+    if (e.status === 412 && e.data && e.data.needsScope) {
+      alert(`Your gh token can read alerts but can't dismiss them yet.\n\nRun this once in your terminal, then click Dismiss again:\n\n    ${e.data.hint}`);
+    } else {
+      alert("Couldn't dismiss the alerts: " + e.message);
+    }
+    restore();
   }
 }
 
@@ -2194,32 +2130,19 @@ async function onBumpConstraints(r, el) {
     }))
   )
     return;
-  const btn = el.querySelector(".act-bump");
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Starting…'; }
+  const restore = btnBusy(el.querySelector(".act-bump"), '<span class="spin"></span>Starting…');
   try {
-    const res = await fetch("/api/bump-constraints", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    await postJSON("/api/bump-constraints", { repo: r.name });
   } catch (e) {
     alert("Couldn't start the constraint bump: " + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = "⛔ Open constraint-bump PR"; }
+    restore();
   }
 }
 
 async function onFixCI(r) {
   if (!(await confirmModal({ message: `Launch a headless Claude session to fix the failing CI checks on ${r.nameWithOwner}?\n\nIt edits the PR branch in a local checkout and pushes — CI then re-runs.`, confirmLabel: "Fix CI" }))) return;
   try {
-    const res = await fetch("/api/fix-ci", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    await postJSON("/api/fix-ci", { repo: r.name });
     pollPRStatus(); // reflect the now-"fixing" state; the session streams into the card
   } catch (e) {
     alert("Couldn't start the fix: " + e.message);
@@ -2374,13 +2297,7 @@ async function onClassify(r, el, stateWanted) {
   if (!meta) return; // cancelled — leave classification unchanged
   el.querySelectorAll(".cls-btn, .cls-opt").forEach((b) => (b.disabled = true));
   try {
-    const res = await fetch("/api/classify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name, state: next, note: meta.note, sowEndDate: meta.sowEndDate }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "classify failed");
+    const data = await postJSON("/api/classify", { repo: r.name, state: next, note: meta.note, sowEndDate: meta.sowEndDate });
     r.classification = data.state || "untriaged";
     if (STATE.tab === "pending") {
       // A pending repo stays in Pending regardless of classification — re-render in
@@ -2401,13 +2318,7 @@ async function onNotify(r, el, clear) {
   if (clear && !(await confirmModal({ message: `Clear the notified status for ${r.nameWithOwner}? It returns to the Monitored list.`, confirmLabel: "Clear notice" }))) return;
   el.querySelectorAll(".act-notify").forEach((b) => (b.disabled = true));
   try {
-    const res = await fetch("/api/notify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name, clear }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "notify failed");
+    const data = await postJSON("/api/notify", { repo: r.name, clear });
     r.notifiedAt = data.notifiedAt;
     r.newAdvisoryCount = 0;
     afterMutation(el);
@@ -2420,21 +2331,14 @@ async function onNotify(r, el, clear) {
 async function onArchive(r, el) {
   if (!(await confirmModal({ message: `Archive ${r.nameWithOwner} on GitHub?\n\nIt becomes read-only and drops out of the active audit. You can unarchive later in repo settings.`, confirmLabel: "Archive", rememberKey: "archive" })))
     return;
-  const btn = el.querySelector(".menu-archive");
-  if (btn) { btn.disabled = true; btn.textContent = "Archiving…"; }
+  const restore = btnBusy(el.querySelector(".menu-archive"), "Archiving…");
   try {
-    const res = await fetch("/api/archive", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "archive failed");
+    await postJSON("/api/archive", { repo: r.name });
     r.archived = true;
     afterMutation(el);
   } catch (e) {
     alert("Archive failed: " + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = "Archive repo"; }
+    restore();
   }
 }
 
@@ -2447,9 +2351,7 @@ async function onEmail(r, el, modeOverride) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Building…'; }
   try {
     const url = "/api/email?repo=" + encodeURIComponent(r.name) + (modeOverride ? "&mode=" + modeOverride : "");
-    const res = await fetch(url);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await getJSON(url);
     await copyRich(data.clipboardHtml, data.clipboardText, null);
     if (data.mode === "mailto") {
       window.location.href =
@@ -2487,13 +2389,7 @@ async function onUpdate(r, el) {
   JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: "⏳ Starting…", level: "info" }] });
   reattachJobs();
   try {
-    const res = await fetch("/api/update-pr", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repo: r.name }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await postJSON("/api/update-pr", { repo: r.name });
     const job = JOBS.get(r.name) || { events: [] };
     job.jobId = data.jobId;
     job.status = data.status || "queued";
@@ -2516,13 +2412,7 @@ async function onFixAll(list, btn) {
   for (const n of names) if (!JOBS.has(n)) JOBS.set(n, { status: "queued", events: [{ type: "log", line: "⏳ Queued…", level: "info" }] });
   reattachJobs();
   try {
-    const res = await fetch("/api/update-all", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ repos: names }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+    const data = await postJSON("/api/update-all", { repos: names });
     for (const j of data.started || []) {
       const job = JOBS.get(j.repo) || { events: [] };
       job.jobId = j.jobId;
@@ -2584,13 +2474,7 @@ async function onProtectAll(list, btn) {
   const failed = [];
   for (const r of list) {
     try {
-      const res = await fetch("/api/protect-branch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: r.name }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `server returned ${res.status}`);
+      await postJSON("/api/protect-branch", { repo: r.name });
       STATE.protection[r.name] = { protected: true, via: "ruleset" };
       r.protected = true;
       done++;
@@ -2604,8 +2488,14 @@ async function onProtectAll(list, btn) {
 }
 
 function cardEl(repo) {
-  const sel = window.CSS && CSS.escape ? CSS.escape(repo) : repo.replace(/"/g, '\\"');
-  return document.querySelector(`.card[data-repo="${sel}"]`);
+  return document.querySelector(`.card[data-repo="${cssEscape(repo)}"]`);
+}
+
+// Busy label for a card's CTA button while its background job is queued/running.
+function jobBusyHtml(status, kind) {
+  if (status === "queued") return "⏳ Queued";
+  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…" }[kind] || "Working…";
+  return `<span class="spin"></span>${label}`;
 }
 
 let _renderTimer = null;
@@ -2617,6 +2507,14 @@ function scheduleRender() {
     render();
     window.scrollTo(0, y);
   }, 180);
+}
+
+// Single list of the card actions toggled while a job runs, so the disable
+// set (reattachJobs) and re-enable sets (finishJob, handleJobEvent) can't drift.
+function setCardActionsDisabled(card, on) {
+  card
+    .querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .act-dismiss, .dd-trigger")
+    .forEach((b) => (b.disabled = on));
 }
 
 // Rebuild the live log + disabled-button state for every active job onto the
@@ -2635,13 +2533,9 @@ function reattachJobs() {
     const btn = card.querySelector(".act-update, .act-bump");
     if (btn) {
       btn.disabled = true;
-      btn.innerHTML = job.status === "queued" ? "⏳ Queued"
-        : job.kind === "fix" ? '<span class="spin"></span>🔧 Fixing CI…'
-        : job.kind === "bump" ? '<span class="spin"></span>⛔ Bumping constraints…'
-        : job.kind === "upgrade" ? '<span class="spin"></span>⬆ Upgrading…'
-        : '<span class="spin"></span>Working…';
+      btn.innerHTML = jobBusyHtml(job.status, job.kind);
     }
-    card.querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .act-dismiss, .dd-trigger").forEach((b) => (b.disabled = true));
+    setCardActionsDisabled(card, true);
   }
 }
 
@@ -2664,7 +2558,7 @@ function finishJob(repo, evt) {
     if (card) {
       const btn = card.querySelector(".act-update");
       if (btn) { btn.disabled = false; btn.textContent = "Re-run update"; }
-      card.querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .dd-trigger").forEach((b) => (b.disabled = false));
+      setCardActionsDisabled(card, false);
     }
   }
 }
@@ -2686,11 +2580,7 @@ function handleJobEvent(evt) {
     const btn = card && card.querySelector(".act-update, .act-bump");
     if (btn && (evt.status === "queued" || evt.status === "running")) {
       btn.disabled = true;
-      btn.innerHTML = evt.status === "queued" ? "⏳ Queued"
-        : job.kind === "fix" ? '<span class="spin"></span>🔧 Fixing CI…'
-        : job.kind === "bump" ? '<span class="spin"></span>⛔ Bumping constraints…'
-        : job.kind === "upgrade" ? '<span class="spin"></span>⬆ Upgrading…'
-        : '<span class="spin"></span>Working…';
+      btn.innerHTML = jobBusyHtml(job.status, job.kind);
     }
     return;
   }
@@ -2710,7 +2600,7 @@ function handleJobEvent(evt) {
     JOBS.delete(repo);
     const b = card && card.querySelector(".act-update");
     if (b) { b.disabled = false; b.textContent = isFix ? "Re-run update" : "Retry update PR"; }
-    if (card) card.querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .dd-trigger").forEach((x) => (x.disabled = false));
+    if (card) setCardActionsDisabled(card, false);
     if (isFix) pollPRStatus(true);
   }
 }
@@ -2858,7 +2748,7 @@ function collectSettings(overlay) {
 async function openSettings() {
   let s;
   try {
-    s = await (await fetch("/api/settings")).json();
+    s = await getJSON("/api/settings");
   } catch {
     alert("Couldn't load settings");
     return;
@@ -2888,13 +2778,7 @@ async function openSettings() {
     btn.disabled = true;
     btn.textContent = "Saving…";
     try {
-      const res = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(collectSettings(overlay)),
-      });
-      const saved = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(saved.error || "save failed");
+      const saved = await postJSON("/api/settings", collectSettings(overlay));
       STATE.emailMode = (saved.email && saved.email.mode) || "mailto";
       if (STATE.model) render();
       overlay.querySelector(".save-msg").textContent = "✓ Saved";
@@ -2932,7 +2816,7 @@ document.addEventListener("keydown", tabNavKeydown);
 
 async function loadEmailMode() {
   try {
-    const s = await (await fetch("/api/settings")).json();
+    const s = await getJSON("/api/settings");
     STATE.emailMode = (s.email && s.email.mode) || "mailto";
   } catch {
     STATE.emailMode = "mailto";
