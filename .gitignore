@@ -22,3 +22,6 @@ fix-attempts.json
 notifications.json
 scope-overrides.json
 engagement-log.json
+
+# Per-user editor/agent config (also covered by many users' global ignores)
+.claude/
