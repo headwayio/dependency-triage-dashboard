@@ -48,6 +48,29 @@ every trigger and the shared pipeline is in
 > Overview UI requires Enterprise. Running locally on your `gh` auth keeps the
 > data behind GitHub's own access controls and adds zero infrastructure.
 
+## Scope — security advisories only, not routine version bumps
+
+This tool acts on **Dependabot security alerts** — the advisory feed
+(`/dependabot/alerts`, backed by GHSA/CVE entries). A package enters the dashboard
+**only if it has an open security advisory**; the model is built entirely from that
+feed, across every severity (critical → low — there's no severity floor).
+
+It deliberately does **not** touch Dependabot's other feature, **scheduled version
+updates** — the `dependabot/*` "Bump X from A to B" PRs your `.github/dependabot.yml`
+opens just to keep dependencies current. Those have *no* advisory (e.g. `pagy 43.4 →
+43.5`, `roo 2 → 3`, `aws-sdk-s3`, a GitHub Action bump), so the tool neither
+generates fixes for them nor merges/closes them. That's intentional: this is a SOC 2
+**security-remediation** dashboard, and auto-handling arbitrary (often major,
+potentially breaking) version bumps would both dilute the audit trail and risk
+breakage. Routine upgrades stay a human decision — review and merge them on GitHub,
+or let Dependabot auto-merge if you configure it.
+
+The one place the tool *interacts* with those version-update PRs is read-only/advisory:
+on a no-change re-check it may comment `@dependabot recreate` on a `dependabot/*` PR
+**only when that PR's target is already satisfied on the default branch** (i.e. it's
+superseded) — see [Create update PR](#create-update-pr). It never opens, edits, or
+merges a version-update PR.
+
 ## Prerequisites
 
 - **Node.js ≥ 18** (`node -v`)
