@@ -244,7 +244,21 @@ auth.
    - **yarn** → Yarn Berry (≥2): `yarn up <pkgs> --mode=update-lockfile`. Yarn
      classic (1.x): noted for manual handling (use `resolutions` / upgrade the
      parent), since transitive dev-deps can't be safely lockfile-bumped in 1.x.
-4. If nothing changed, it stops and tells you (no empty PR)
+4. If nothing changed, it stops and tells you (no empty PR). On this no-change
+   path it also **auto-closes any obsolete PR** the tool previously opened for the
+   repo — a re-check that produces no diff means the flagged advisories are already
+   resolved (e.g. another PR merged the bump), so the stale update PR is closed with
+   an explanatory comment and its branch deleted. This mirrors `@dependabot rebase`
+   auto-closing a no-longer-needed PR. Scoped to the tool's own
+   `branchPrefix` branches — human, runtime-upgrade, and constraint-bump PRs are
+   never touched. Disable with `"closeObsoletePRs": false`. The same no-change path
+   also comments **`@dependabot recreate`** on the repo's open `dependabot/*` PRs
+   that are **already satisfied on the default branch** — the PR's target (from its
+   `Bump <pkg> from <a> to <b>` title) is compared against the installed lockfile
+   version, so still-needed bumps (pagy, aws-sdk, …) and unverifiable ones
+   (github-actions, git-sha pins) are left alone. Dependabot then self-closes the
+   superseded ones. Deduped to once per PR per day. Disable with
+   `"nudgeDependabotOnClear": false`.
 5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`
 
 The PR body lists every advisory it targeted and reminds reviewers to let CI run
@@ -432,6 +446,8 @@ git-ignored, so your settings stay local):
 | `workDir` | `.work` | where repos are cloned for jobs (git-ignored) |
 | `alertState` | `open` | which Dependabot alerts to pull |
 | `draftPRs` | `true` | open every PR (update, upgrade, bump) as a draft |
+| `closeObsoletePRs` | `true` | on a no-change re-check, auto-close the tool's now-obsolete update PR for that repo (comment + delete branch); scoped to `branchPrefix` branches |
+| `nudgeDependabotOnClear` | `true` | on a no-change re-check, comment `@dependabot recreate` on the repo's open `dependabot/*` PRs **already satisfied on the default branch** so Dependabot self-closes them (deduped once/PR/day); still-needed/unverifiable PRs are left alone |
 | `includeRepos` | `[]` | allowlist (empty = all repos with open alerts) |
 | `excludeRepos` | `[]` | repos to skip |
 | `branchPrefix` | `dependency-updates/soc2` | update-branch name prefix |

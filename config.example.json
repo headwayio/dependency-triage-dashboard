@@ -5,6 +5,8 @@
   "workDir": ".work",
   "branchPrefix": "dependency-updates/soc2",
   "draftPRs": true,
+  "closeObsoletePRs": true,
+  "nudgeDependabotOnClear": true,
   "alertState": "open",
   "includeRepos": [],
   "excludeRepos": [],

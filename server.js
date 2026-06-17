@@ -60,6 +60,8 @@ function loadConfig() {
     workDir: ".work",
     branchPrefix: "dependency-updates/soc2",
     draftPRs: true,
+    closeObsoletePRs: true, // a no-change re-check closes any now-obsolete tool update PR
+    nudgeDependabotOnClear: true, // ...and asks Dependabot to re-evaluate/close its superseded PRs
     alertState: "open",
     includeRepos: [],
     excludeRepos: [],
@@ -371,6 +373,13 @@ function runJob(job) {
         job.model.pending = true;
         job.model.openPRs = job.model.openPRs || [];
         if (!job.model.openPRs.some((p) => p.url === result.prUrl)) job.model.openPRs.push(entry);
+      }
+      // A no-change re-check may have closed an obsolete update PR — drop it from the
+      // cached model so the repo leaves Pending on the next reload (no full re-scan).
+      if (result && result.closedPRs && result.closedPRs.length) {
+        const closed = new Set(result.closedPRs);
+        if (job.model.openPRs) job.model.openPRs = job.model.openPRs.filter((p) => !closed.has(p.url));
+        job.model.pending = !!(job.model.openPRs && job.model.openPRs.length);
       }
       // Persist a gem's verdict (covered | blocked) so the card routes to the Covered
       // tab / constraint-bump flow on the next reload without re-running.
