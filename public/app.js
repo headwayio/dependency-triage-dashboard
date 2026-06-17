@@ -2443,6 +2443,15 @@ async function onUpdate(r, el) {
     job.jobId = data.jobId;
     job.status = data.status || "queued";
     JOBS.set(r.name, job);
+    // The server re-checked this repo (fresh alerts + live PR reconcile) before
+    // starting — apply it now so a merged PR drops out of Pending and any new
+    // advisory shows up immediately, without a manual Refresh.
+    if (data.model && STATE.model) {
+      const i = STATE.model.repos.findIndex((x) => x.name === r.name);
+      if (i >= 0) Object.assign(STATE.model.repos[i], data.model);
+      scheduleRender();
+      reattachJobs();
+    }
   } catch (e) {
     JOBS.delete(r.name);
     scheduleRender();

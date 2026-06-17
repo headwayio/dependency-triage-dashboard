@@ -1227,8 +1227,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && route === "/api/update-pr") {
       const { repo } = await repoBody(req);
       const repoModel = await repoFromModel(repo);
+      // Re-check this repo against live GitHub before running: pick up new advisories
+      // (so a re-run targets them) and reconcile externally merged/closed PRs out of
+      // Pending. Best-effort — a refresh failure falls back to the cached model.
+      try {
+        await gh.refreshRepoModel(config, repoModel);
+      } catch (e) {
+        console.warn(`refreshRepoModel(${repo}) failed, using cached model:`, e.message);
+      }
       const job = startUpdateJob(repoModel);
-      return sendJSON(res, 200, { jobId: job.id, repo, status: job.status });
+      return sendJSON(res, 200, { jobId: job.id, repo, status: job.status, model: repoModel });
     }
 
     // Start background update-PR jobs for many repos at once ("Fix All"). The
