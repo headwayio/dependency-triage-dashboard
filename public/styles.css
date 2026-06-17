@@ -580,7 +580,9 @@ button.subtle { color: var(--muted); }
 .cls-current { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 7px; padding: 5px 11px; font-size: 13px; }
 .more-btn { background: transparent; border: 1px solid var(--border); border-radius: 7px; padding: 7px 12px; color: var(--muted); font-weight: 700; letter-spacing: 1px; line-height: 1.5; }
 .more-btn:hover, .cls-current:hover { background: #232b3a; color: var(--text); }
-.dd-menu { position: absolute; top: calc(100% + 4px); left: 0; min-width: 184px; max-width: calc(100vw - 24px); background: #1d2433; border: 1px solid #313c4f; border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65); padding: 5px; z-index: 40; display: flex; flex-direction: column; gap: 2px; }
+/* Right-aligned to the "⋯" trigger (which sits at the card's right edge) so the
+   menu opens leftward, into the viewport, instead of off the right edge. */
+.dd-menu { position: absolute; top: calc(100% + 4px); right: 0; left: auto; min-width: 184px; max-width: calc(100vw - 24px); background: #1d2433; border: 1px solid #313c4f; border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65); padding: 5px; z-index: 40; display: flex; flex-direction: column; gap: 2px; }
 .dd-menu[hidden] { display: none; }
 .dd-menu button { text-align: left; background: transparent; border: none; border-radius: 6px; padding: 7px 10px; font: inherit; font-size: 13px; color: var(--text); white-space: nowrap; }
 .dd-menu button:hover { background: var(--panel-2); }

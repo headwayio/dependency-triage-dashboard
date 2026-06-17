@@ -2600,15 +2600,33 @@ function reattachJobs() {
 function finishJob(repo, evt) {
   const r = STATE.model && STATE.model.repos.find((x) => x.name === repo);
   JOBS.delete(repo);
+  // A no-change re-check may have closed now-obsolete tool PRs — drop them from the
+  // local model so the repo leaves the Pending tab live (mirrors the server cache).
+  const closedAny = !!(r && evt.closedPRs && evt.closedPRs.length);
+  if (closedAny) {
+    const closed = new Set(evt.closedPRs);
+    if (r.openPRs) r.openPRs = r.openPRs.filter((p) => !closed.has(p.url));
+    r.pending = !!(r.openPRs && r.openPRs.length);
+  }
   if (evt.prUrl && r) {
     const num = (evt.prUrl.match(/\/pull\/(\d+)/) || [])[1];
     r.pending = true;
-    r.openPRs = [{ number: num ? Number(num) : "?", url: evt.prUrl, draft: true }];
+    // Merge (don't clobber): a repo can have several open tool PRs — a runtime
+    // upgrade and a prior-day update alongside today's. Replacing the array hid
+    // them until the next Refresh. Mirrors the server-side merge in runJob.
+    r.openPRs = r.openPRs || [];
+    if (!r.openPRs.some((p) => p.url === evt.prUrl)) {
+      r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true });
+    }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (r && evt.disposition) {
     // A gem resolved to covered/blocked — attach the verdict and re-render so it
     // moves to the Covered tab (covered) or shows the constraint-bump CTA (blocked).
     r.disposition = evt.disposition;
+    scheduleRender();
+  } else if (closedAny) {
+    // Re-render so the closed PR drops and the repo leaves Pending; this also
+    // rebuilds the card with its action buttons re-enabled.
     scheduleRender();
   } else {
     // No PR produced (no changes / manual remediation) — re-enable in place.
@@ -2713,7 +2731,7 @@ function handleEvent(ev, box) {
       const n = (ev.notes || []).length;
       logLine(
         box,
-        n ? `↑ Couldn't auto-update — ${n} specific note${n > 1 ? "s" : ""} above explain exactly what's needed.` : "No changes produced — nothing flagged here.",
+        n ? `↑ Couldn't auto-update — ${n} specific note${n > 1 ? "s" : ""} above explain${n > 1 ? "" : "s"} exactly what's needed.` : "No changes produced — nothing flagged here.",
         "warn"
       );
     }
