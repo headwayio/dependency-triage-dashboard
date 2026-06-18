@@ -14,9 +14,10 @@ const PORT = Number(process.env.PORT || 8899);
 const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
 
 // ---- alert model fixtures ----------------------------------------------------
-const pkg = (severity, ecosystem, name, patched, ghsa, manifest) => ({
+const pkg = (severity, ecosystem, name, patched, ghsa, manifest, ann) => ({
   severity, ecosystem, pkg: name, patched, ghsa,
   url: `https://github.com/advisories/${ghsa}`, manifest: manifest || (ecosystem === "rubygems" ? "Gemfile.lock" : "package-lock.json"),
+  ...(ann || {}), // optional installed/target/bump/majorRequired (the real model annotates these)
 });
 
 const repos = [
@@ -29,8 +30,8 @@ const repos = [
       pkg("critical", "rubygems", "rails", "7.1.5.2", "GHSA-x7j2-9q4r-aaaa"),
       pkg("critical", "rubygems", "nokogiri", "1.18.3", "GHSA-pp22-8a3c-bbbb"),
       pkg("high", "rubygems", "rack", "3.1.12", "GHSA-7g2v-jj9q-cccc"),
-      pkg("high", "rubygems", "devise", "4.9.4", "GHSA-1m2n-3o4p-dddd"),
-      pkg("high", "npm", "axios", "1.8.2", "GHSA-jr5f-v2jv-eeee"),
+      pkg("high", "rubygems", "devise", "5.0.4", "GHSA-1m2n-3o4p-dddd", null, { installed: "4.9.4", target: "5.0.4", bump: "major", majorRequired: true }),
+      pkg("high", "npm", "axios", "2.0.0", "GHSA-jr5f-v2jv-eeee", null, { installed: "1.8.2", target: "2.0.0", bump: "major", majorRequired: true }),
       pkg("high", "npm", "lodash", "4.17.23", "GHSA-29mw-wpgm-ffff"),
       pkg("high", "rubygems", "globalid", "1.2.1", "GHSA-23c2-9w3e-gggg"),
       pkg("medium", "rubygems", "puma", "6.4.3", "GHSA-9hf4-67fc-hhhh"),
@@ -42,6 +43,10 @@ const repos = [
     published: null, dependents: [], dependsOnOrg: ["acme-core-gem"],
     contact: { name: "Casey Lee", email: "casey@example.com" },
     notifiedAt: null, newAdvisoryCount: 0, disposition: null, openPRs: [],
+    blocked: [
+      { ecosystem: "rubygems", pkg: "devise", resolved: "4.9.4", floor: "5.0.4", reason: "Capped below the patched floor by a Gemfile or parent-gem constraint — bump the blocking constraint (or parent gem) to admit the patch." },
+      { ecosystem: "npm", pkg: "minimatch", resolved: "3.0.5", floor: "3.1.4", reason: "Still below the patched floor after a manifest override — a parent dependency's range pins it; bump the parent." },
+    ],
     engagement: { at: days(30), kind: "engagement", from: "untriaged", to: "maintained", note: "Active SOW through Q4." },
   },
   {
