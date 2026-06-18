@@ -1929,14 +1929,39 @@ function reviewBadge(pr) {
 // One PR per row: link + review status + the CI check state, all consolidated onto a
 // single line (the CI used to be its own row). A failing PR's "Fix CI" button rides in
 // the right slot next to Copy.
+// Per-PR check-state label, from the per-PR status pollCI attaches. Each open PR has its
+// own check run, so every chip shows its own badge — not just the repo's worst on chip 0.
+function ciLabel(ci) {
+  if (!ci || !ci.state) return "";
+  const fails = (ci.failing || []).length;
+  const labels = {
+    passing: "✓ checks passing",
+    failing: `✗ ${fails} check${fails === 1 ? "" : "s"} failing`,
+    pending: "⏳ checks running",
+    none: "— no checks",
+  };
+  if (!labels[ci.state]) return "";
+  const cls = { passing: "ok", failing: "danger", pending: "warn", none: "muted" }[ci.state] || "muted";
+  const t = fails ? ` title="${esc(ci.failing.join(", "))}"` : "";
+  return `<span class="ci-inline ${cls}"${t}>${labels[ci.state]}</span>`;
+}
+
 function prChips(r) {
   if (!r.openPRs || !r.openPRs.length) return "";
-  const ci = ciInline(r); // { text, btn } — appended to the first PR row
+  const ci = ciInline(r); // repo-level — supplies the Fix CI button (+ the legacy fallback)
+  // New servers attach per-PR status (pr.ci); older ones don't. Fall back to the repo-level
+  // badge on the first chip so a browser-reload-before-server-restart doesn't lose all badges.
+  const havePerPr = r.openPRs.some((pr) => pr.ci && pr.ci.state);
+  let btnShown = false; // one fix job per repo → attach its button to the first failing PR
   return r.openPRs
     .map((pr, i) => {
-      const ciText = i === 0 && ci.text ? ` <span class="pr-meta">·</span> ${ci.text}` : "";
+      const label = havePerPr ? ciLabel(pr.ci) : (i === 0 ? ci.text : "");
+      const ciText = label ? ` <span class="pr-meta">·</span> ${label}` : "";
+      let fixBtn = "";
+      const isFailing = havePerPr ? !!(pr.ci && pr.ci.state === "failing") : i === 0;
+      if (!btnShown && isFailing && ci.btn) { fixBtn = ci.btn; btnShown = true; }
       const right =
-        (i === 0 ? ci.btn : "") +
+        fixBtn +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
       const title = (pr.title || "").trim();
       const titleHtml = title
@@ -1991,7 +2016,7 @@ async function pollPRStatus(refresh) {
         if (!metas || !r.openPRs) continue;
         for (const pr of r.openPRs) {
           const m = metas.find((x) => x.number === pr.number);
-          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; }
+          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; pr.ci = m.ci; }
         }
       }
     }

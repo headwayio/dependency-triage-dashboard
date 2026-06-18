@@ -590,6 +590,9 @@ async function pollCI() {
         pr.draft = st.isDraft;
         pr.reviewDecision = st.reviewDecision;
         pr.reviewers = st.reviewers || [];
+        // Per-PR check state — each open PR has its own check run, so the card can show a
+        // badge on every PR, not just the repo's "worst" on the first chip.
+        pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
       }
       if (!worst || (STATE_RANK[st.state] || 0) > (STATE_RANK[worst.state] || 0)) worst = st;
 
@@ -830,7 +833,7 @@ const server = http.createServer(async (req, res) => {
       if (modelCache) {
         for (const r of modelCache.repos) {
           if (r.pending && (r.openPRs || []).length) {
-            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [] }));
+            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], ci: p.ci || null }));
           }
         }
       }
