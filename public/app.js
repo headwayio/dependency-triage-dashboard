@@ -2816,10 +2816,11 @@ function finishJob(repo, evt) {
     // Major-upgrade fan-out: one PR per major. Merge them all into openPRs (don't clobber).
     r.pending = true;
     r.openPRs = r.openPRs || [];
+    const titleFor = new Map((evt.prs || []).map((p) => [p.url, p.title]));
     for (const url of evt.prUrls) {
       if (r.openPRs.some((p) => p.url === url)) continue;
       const num = (url.match(/\/pull\/(\d+)/) || [])[1];
-      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true });
+      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true, title: titleFor.get(url) || "" });
     }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (evt.prUrl && r) {
