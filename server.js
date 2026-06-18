@@ -895,6 +895,46 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { jobId: job.id, repo, failing: st.failing.map((f) => f.name) });
     }
 
+    // Add a reviewer to one PR (the dashboard's one-click "Request review from @who").
+    if (req.method === "POST" && route === "/api/request-review") {
+      const { repo, number, reviewer } = await repoBody(req);
+      const num = Number(number);
+      if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
+      const handle = String(reviewer || "").trim();
+      if (!handle || !/^[A-Za-z0-9._/-]+$/.test(handle)) return sendJSON(res, 400, { error: "Valid reviewer handle required." });
+      const nwo = `${config.org}/${repo}`;
+      const out = await run("gh", ["pr", "edit", String(num), "--repo", nwo, "--add-reviewer", handle]);
+      if (out.code !== 0) return sendJSON(res, 502, { error: (out.stderr || "gh pr edit failed").trim() });
+      // Reflect the request in the cache so the badge updates without a full Refresh.
+      let reviewers = null;
+      if (modelCache) {
+        const r = modelCache.repos.find((x) => x.name === repo);
+        const pr = r && (r.openPRs || []).find((p) => p.number === num);
+        if (pr) {
+          pr.reviewers = Array.from(new Set([...(pr.reviewers || []), handle.split("/").pop()]));
+          if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+          reviewers = pr.reviewers;
+        }
+      }
+      return sendJSON(res, 200, { repo, number: num, reviewer: handle, reviewers });
+    }
+
+    // Flip one draft PR to ready-for-review.
+    if (req.method === "POST" && route === "/api/ready-for-review") {
+      const { repo, number } = await repoBody(req);
+      const num = Number(number);
+      if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
+      const nwo = `${config.org}/${repo}`;
+      const out = await run("gh", ["pr", "ready", String(num), "--repo", nwo]);
+      if (out.code !== 0) return sendJSON(res, 502, { error: (out.stderr || "gh pr ready failed").trim() });
+      if (modelCache) {
+        const r = modelCache.repos.find((x) => x.name === repo);
+        const pr = r && (r.openPRs || []).find((p) => p.number === num);
+        if (pr) pr.draft = false;
+      }
+      return sendJSON(res, 200, { repo, number: num, draft: false });
+    }
+
     // EOL runtime findings per repo (cached; ?refresh=1 scans now).
     if (req.method === "GET" && route === "/api/eol-status") {
       if (u.searchParams.get("refresh") === "1") await pollEol();

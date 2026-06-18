@@ -535,6 +535,12 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .toast.out { opacity: 0; transition: opacity 0.3s ease; }
 @keyframes toastin { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .copy-btn { white-space: nowrap; font-size: 13px; }
+/* Per-PR review actions (request review / draft→ready) in the row's right slot. */
+.pr-act { white-space: nowrap; font-size: 12px; padding: 3px 10px; border-radius: 6px; }
+.pr-act:disabled { opacity: 0.6; }
+.act-ready-pr { background: var(--ok); border-color: var(--ok); color: #06140d; font-weight: 600; }
+/* Re-assert a (darker) green on hover, else the generic `button:hover` paints it gray. */
+.act-ready-pr:hover:not(:disabled) { background: #2ea043; border-color: #2ea043; color: #fff; }
 .pending-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .pending-toolbar:empty { display: none; } /* no bulk button (e.g. <2 repos) → don't reserve space */
 .copy-all, .open-all { font-weight: 600; }

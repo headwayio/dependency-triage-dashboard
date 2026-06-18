@@ -1966,8 +1966,22 @@ function prChips(r) {
       let fixBtn = "";
       const isFailing = havePerPr ? !!(pr.ci && pr.ci.state === "failing") : i === 0;
       if (!btnShown && isFailing && ci.btn) { fixBtn = ci.btn; btnShown = true; }
+      // One-click "request review from the person you usually ask" (derived server-side
+      // from the most recent PR, open or closed). Only on a NON-draft PR: GitHub doesn't
+      // notify requested reviewers while a PR is a draft, so gate it behind the draft→ready
+      // flip below — request a review only once the PR is actually ready for one.
+      const sr = r.suggestedReviewer;
+      const alreadyReq = sr && (pr.reviewers || []).map(String).includes(sr.display);
+      const reviewBtn = sr && !pr.draft && !alreadyReq && pr.reviewDecision !== "APPROVED"
+        ? `<button class="pr-act act-request-review" data-number="${pr.number}" data-reviewer="${esc(sr.handle)}" title="Request a review from @${esc(sr.display)} on this PR">👤 Request review from @${esc(sr.display)}</button>`
+        : "";
+      const readyBtn = pr.draft
+        ? `<button class="pr-act act-ready-pr" data-number="${pr.number}" title="Mark this draft PR as ready for review on GitHub">✓ Ready for review</button>`
+        : "";
       const right =
         fixBtn +
+        reviewBtn +
+        readyBtn +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
       const title = (pr.title || "").trim();
       const titleHtml = title
@@ -2473,6 +2487,49 @@ async function onFixCI(r) {
   }
 }
 
+// One-click "request review from @who" on a single PR (who = r.suggestedReviewer,
+// resolved server-side). Reflects the request in the model + re-renders, no Refresh.
+async function onRequestReview(r, btn) {
+  const number = Number(btn.dataset.number);
+  const reviewer = btn.dataset.reviewer;
+  const display = reviewer.split("/").pop();
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.textContent = "Requesting…";
+  try {
+    const data = await postJSON("/api/request-review", { repo: r.name, number, reviewer });
+    const pr = (r.openPRs || []).find((p) => p.number === number);
+    if (pr) {
+      pr.reviewers = data.reviewers || Array.from(new Set([...(pr.reviewers || []), display]));
+      if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+    }
+    scheduleRender();
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = old;
+    alert("Couldn't request review: " + e.message);
+  }
+}
+
+// Flip a draft PR to ready-for-review on GitHub, then update the model + re-render.
+async function onReadyForReview(r, btn) {
+  const number = Number(btn.dataset.number);
+  if (!(await confirmModal({ message: `Mark PR #${number} on ${r.nameWithOwner} as ready for review?\n\nThis flips it out of draft on GitHub.`, confirmLabel: "Ready for review" }))) return;
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.textContent = "Updating…";
+  try {
+    await postJSON("/api/ready-for-review", { repo: r.name, number });
+    const pr = (r.openPRs || []).find((p) => p.number === number);
+    if (pr) pr.draft = false;
+    scheduleRender();
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = old;
+    alert("Couldn't mark ready: " + e.message);
+  }
+}
+
 // Order a tab's repos as a dependency FOREST: a repo that another repo depends on
 // is rendered indented beneath its consumer. Returns [{repo, depth, parentName}].
 // Handles multi-level nesting; a shared dependency nests under its first consumer
@@ -2611,6 +2668,8 @@ function card(r, nesting) {
   el.querySelectorAll(".act-copy-pr").forEach((b) =>
     b.addEventListener("click", () => copyRich(anchorHtml(b.dataset.url, b.dataset.label), b.dataset.url, b))
   );
+  el.querySelectorAll(".act-request-review").forEach((b) => b.addEventListener("click", () => onRequestReview(r, b)));
+  el.querySelectorAll(".act-ready-pr").forEach((b) => b.addEventListener("click", () => onReadyForReview(r, b)));
   const fix = el.querySelector(".ci-fix-btn");
   if (fix) fix.addEventListener("click", () => onFixCI(r));
   el.querySelectorAll(".eol-upgrade-btn").forEach((b) => b.addEventListener("click", () => onUpgradeRuntime(r, b.dataset.id)));
