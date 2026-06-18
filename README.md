@@ -233,17 +233,21 @@ and which actions it gets. Classification is purely local triage: unlike
 | --- | --- |
 | **Untriaged** | Not yet classified — the triage inbox. Hidden when empty. |
 | **Maintained** | Active client / we host — repos we actually patch. |
-| **Pending PR** | Has an open tool-opened PR still in review or being fixed (not yet approved). Takes precedence over every other tab, whatever the classification. |
-| **Approved PR** | Has an open tool-opened PR that's **approved** — ready to merge. Splits out of Pending PR so the merge-ready set is obvious. Hidden when empty. |
+| **Pending PR** | Has an open tool-opened PR whose CI is still running, failing, or being fixed. Takes precedence over every other tab, whatever the classification. |
+| **Passing PR** | Has an open tool-opened PR with **green CI** but no approval yet — awaiting review. Hidden when empty. |
+| **Approved PR** | Has an open tool-opened PR that's **approved** — ready to merge. Hidden when empty. |
 | **Covered** | A maintained **gem** whose constraints already permit every patch — no action needed. Hidden when empty. |
 | **Monitored** | Inactive client we watch but don't patch — we notify them instead. |
 | **Notified** | A monitored repo whose client we've emailed, with no new advisories since. |
 | **Ignored** | Out of scope for this tool. |
 | **🛡 Compliance** | A *separate* full-org inventory — **every** non-archived repo, not just alerted ones — for the SOC 2 scope decision + branch protection. See [below](#branch-protection--the-compliance-inventory). |
 
-Archived repos drop out of GitHub's alert feed entirely, so there's no archived
-tab. The headline **"to maintain"** count is Maintained + Pending + Approved (open
-PRs still count as work until merged) — covered gems and everything
+An open tool PR flows through three lifecycle tabs as it progresses —
+**Pending PR** (CI running/failing) → **Passing PR** (green CI, awaiting review) →
+**Approved PR** (ready to merge) — so the worklist is sorted by how close each PR is
+to merging. Archived repos drop out of GitHub's alert feed entirely, so there's no
+archived tab. The headline **"to maintain"** count is Maintained + Pending + Passing
++ Approved (open PRs still count as work until merged) — covered gems and everything
 monitored/ignored are excluded. Triage buttons sit on each card in
 the **Untriaged** tab; elsewhere they move into a per-card menu. Marking a
 *monitored* repo notified moves it Monitored → Notified, and a **new** advisory
@@ -441,12 +445,12 @@ recommended"* and the repo returns to **Monitored**.
 checks — a draft with failing checks offers a one-click Fix CI that launches a
 headless Claude session, next to an approved PR with checks passing](docs/pending-tab.png)
 
-*The Pending PR tab — where opened PRs live while in review or being fixed. Each
-card shows the PR's review state and live CI checks: the failing one offers
-**🔧 Fix CI** (the headless Claude loop below). Once a PR is **approved** it moves
-to the **Approved PR** tab (the merge-ready worklist). Both PR tabs carry the same
-bulk actions to copy every PR link for Slack or open them all in the browser. Shown
-with demo data.*
+*The Pending PR tab — where opened PRs live while CI runs or they're being fixed.
+Each card shows the PR's review state and live CI checks: the failing one offers
+**🔧 Fix CI** (the headless Claude loop below). As a PR progresses it advances to the
+**Passing PR** tab (green CI, awaiting review) and then **Approved PR** (the
+merge-ready worklist). All three PR tabs carry the same bulk actions to copy every PR
+link for Slack or open them all in the browser. Shown with demo data.*
 
 Three loops can run **unattended**. All ship **off in code** and are turned on by your
 `config.json`; each is independent, capped, and safe to flip off (two have

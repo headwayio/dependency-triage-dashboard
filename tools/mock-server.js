@@ -159,6 +159,22 @@ const repos = [
     engagement: null,
   },
   {
+    name: "checkout-api", nameWithOwner: "acme-corp/checkout-api", url: "https://github.com/acme-corp/checkout-api",
+    archived: false, pending: true, classification: "maintained",
+    counts: { critical: 0, high: 1, medium: 1, low: 0, total: 2 },
+    ecosystems: { rubygems: 2 },
+    packages: [
+      pkg("high", "rubygems", "rack", "3.1.8", "GHSA-efef-3636-ooap"),
+      pkg("medium", "rubygems", "nokogiri", "1.18.2", "GHSA-ghgh-4747-ppaq"),
+    ],
+    language: "Ruby", visibility: "PRIVATE", defaultBranch: "main", pushedAt: days(2),
+    published: null, dependents: [], dependsOnOrg: [],
+    contact: null, notifiedAt: null, newAdvisoryCount: 0, disposition: null,
+    // CI green, but no approval yet → lands in the "Passing PR" tab awaiting review.
+    openPRs: [{ number: 89, url: "https://github.com/acme-corp/checkout-api/pull/89", draft: false, reviewDecision: null, reviewers: ["caseylee"] }],
+    engagement: null,
+  },
+  {
     name: "internal-tools-gem", nameWithOwner: "acme-corp/internal-tools-gem", url: "https://github.com/acme-corp/internal-tools-gem",
     archived: false, pending: false, classification: "maintained",
     counts: { critical: 0, high: 2, medium: 1, low: 0, total: 3 },
@@ -259,10 +275,12 @@ const protection = {
 const ciStatuses = {
   "acme-frontend": { state: "failing", failing: ["rspec", "eslint"], headSha: "abc123", attempts: 1, capped: false, fixing: false, at: Date.now() },
   "data-pipeline": { state: "passing", failing: [], headSha: "def456", attempts: 0, capped: false, fixing: false, at: Date.now() },
+  "checkout-api": { state: "passing", failing: [], headSha: "ghi789", attempts: 0, capped: false, fixing: false, at: Date.now() },
 };
 const prMeta = {
   "acme-frontend": [{ number: 142, draft: true, reviewDecision: null, reviewers: ["caseylee"] }],
   "data-pipeline": [{ number: 57, draft: false, reviewDecision: "APPROVED", reviewers: [] }],
+  "checkout-api": [{ number: 89, draft: false, reviewDecision: null, reviewers: ["caseylee"] }],
 };
 
 const compRepo = (name, opts = {}) => ({
