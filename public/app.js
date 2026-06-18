@@ -2717,6 +2717,35 @@ function reattachJobs() {
 function finishJob(repo, evt) {
   const r = STATE.model && STATE.model.repos.find((x) => x.name === repo);
   JOBS.delete(repo);
+  // Attach the run's blocked survivors (advisories a manifest constraint caps below
+  // their patched floor) so the card shows them live. An update run always reports
+  // `blocked` — an empty array clears a stale one. Render happens via the branches below.
+  if (r && Array.isArray(evt.blocked)) r.blocked = evt.blocked.length ? evt.blocked : null;
+
+  // A no-change run re-fetched this repo's alerts + tool PRs — apply the fresh snapshot
+  // so the card shows real counts/pending immediately (e.g. 0 after a merge resolved the
+  // advisories) instead of stale pre-merge data, without waiting for a full Refresh.
+  if (r && evt.refreshed) {
+    Object.assign(r, evt.refreshed); // counts, ecosystems, packages, openPRs, pending
+    // Carry the run's gem verdict too (a no-change gem run still resolves covered/blocked).
+    if (evt.disposition) r.disposition = evt.disposition;
+    // Belt-and-suspenders: drop a just-closed PR even if GitHub's open-PR list lags.
+    if (evt.closedPRs && evt.closedPRs.length && r.openPRs) {
+      const closed = new Set(evt.closedPRs);
+      r.openPRs = r.openPRs.filter((p) => !closed.has(p.url));
+      r.pending = r.openPRs.length > 0;
+    }
+    // The model is alert-driven: a repo with no open alerts and no in-flight PR is
+    // exactly what a full Refresh would shed (buildModel only includes repos with open
+    // alerts). Drop it now so a freshly-cleaned repo doesn't linger in Maintained with
+    // a "0 alerts" card — render() recomputes the tabs + headline stats from the model.
+    if ((r.counts ? r.counts.total : 0) === 0 && !r.pending) {
+      const i = STATE.model.repos.indexOf(r);
+      if (i >= 0) STATE.model.repos.splice(i, 1);
+    }
+    scheduleRender(); // a fresh card render also re-enables the action buttons
+    return;
+  }
   // A no-change re-check may have closed now-obsolete tool PRs — drop them from the
   // local model so the repo leaves the Pending tab live (mirrors the server cache).
   const closedAny = !!(r && evt.closedPRs && evt.closedPRs.length);
