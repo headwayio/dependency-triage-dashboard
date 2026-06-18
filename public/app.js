@@ -2989,6 +2989,20 @@ function finishJob(repo, evt) {
   }
 }
 
+// A major-upgrade fan-out opens one PR per major and streams a "pr" event as each
+// lands. Merge it into the model and re-render so it shows in the Pending/Passing PR
+// tab right away — without ending the still-running job (render→reattachJobs restores
+// the live runlog + busy buttons). Idempotent on url, so a reconnect replay is safe.
+function mergeStreamedPR(repo, evt) {
+  const r = STATE.model && STATE.model.repos.find((x) => x.name === repo);
+  if (!r || !evt.prUrl || (r.openPRs && r.openPRs.some((p) => p.url === evt.prUrl))) return;
+  const num = (evt.prUrl.match(/\/pull\/(\d+)/) || [])[1];
+  r.pending = true;
+  r.openPRs = r.openPRs || [];
+  r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "" });
+  scheduleRender();
+}
+
 // Route one event from the global stream to its repo's card + buffer.
 function handleJobEvent(evt) {
   if (evt.type === "hello") { if (evt.maxConcurrent) STATE.maxConcurrent = evt.maxConcurrent; return; }
@@ -3020,6 +3034,8 @@ function handleJobEvent(evt) {
   if (evt.type === "done") {
     if (job.kind === "fix") { JOBS.delete(repo); pollPRStatus(true); } // CI re-runs; refresh badge, don't move
     else finishJob(repo, evt);
+  } else if (evt.type === "pr") {
+    mergeStreamedPR(repo, evt); // a fan-out PR opened mid-run — surface it now; job keeps running
   } else if (evt.type === "error") {
     const isFix = job.kind === "fix";
     job.status = "error";

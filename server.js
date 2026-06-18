@@ -263,6 +263,18 @@ function jobEmit(job, type, data) {
   broadcast(evt);
 }
 
+// Merge one newly-opened PR into a repo's cached model so a reload (which reads the
+// cache, not the live event stream) shows it in Pending with its title + head branch,
+// independent of GitHub's PR-search index catching up. Idempotent on url.
+function persistOpenPR(model, { url, title, branch }, draft) {
+  if (!model || !url) return;
+  model.pending = true;
+  model.openPRs = model.openPRs || [];
+  if (model.openPRs.some((p) => p.url === url)) return;
+  const num = (url.match(/\/pull\/(\d+)/) || [])[1];
+  model.openPRs.push({ number: num ? Number(num) : null, url, draft: !!draft, title: title || "", headRefName: branch || null });
+}
+
 function findActiveJob(repoName) {
   for (const j of jobs.values()) {
     if (j.repo === repoName && (j.status === "queued" || j.status === "running")) return j;
@@ -402,7 +414,12 @@ function runJob(job) {
   jobEmit(job, "status", { status: "running", kind: job.kind });
   (async () => {
     try {
-      const emit = (type, data) => jobEmit(job, type, { ...data, kind: job.kind });
+      const emit = (type, data) => {
+        // Incremental PR (major fan-out streams one per major as it opens): persist it
+        // into the cache now so a mid-run reload shows it without waiting for `done`.
+        if (type === "pr" && data) persistOpenPR(job.model, { url: data.prUrl, title: data.title, branch: data.branch }, config.draftPRs);
+        jobEmit(job, type, { ...data, kind: job.kind });
+      };
       const result =
         job.kind === "bump"
           ? await createConstraintBumpPR({ config, repo: job.model, blocked: job.blocked, emit })
@@ -417,17 +434,13 @@ function runJob(job) {
       // (which reads the cache) keeps the repo in Pending, independent of GitHub's
       // PR-search index catching up. Merge (don't clobber) so a runtime upgrade,
       // a major-upgrade fan-out (prUrls[]), and a dependency-update PR can coexist.
-      const newUrls = [result && result.prUrl, ...((result && result.prUrls) || [])].filter(Boolean);
-      if (newUrls.length) {
-        job.model.pending = true;
-        job.model.openPRs = job.model.openPRs || [];
-        for (const url of newUrls) {
-          const num = (url.match(/\/pull\/(\d+)/) || [])[1];
-          if (!job.model.openPRs.some((p) => p.url === url)) {
-            job.model.openPRs.push({ number: num ? Number(num) : null, url, draft: !!config.draftPRs });
-          }
-        }
-      }
+      // Reflect every newly-opened PR in the cached model — carrying title + head branch
+      // so a reload shows them before the next full Refresh re-runs fetchToolPRs. Major
+      // fan-outs already streamed each PR via "pr" events (persistOpenPR is idempotent on
+      // url), so this also backfills a single-PR job and anything that slipped a reconnect.
+      if (result && result.prUrl) persistOpenPR(job.model, { url: result.prUrl, title: result.title, branch: result.branch }, config.draftPRs);
+      for (const p of (result && result.prs) || []) persistOpenPR(job.model, { url: p.url, title: p.title, branch: p.branch }, config.draftPRs);
+      for (const url of (result && result.prUrls) || []) persistOpenPR(job.model, { url }, config.draftPRs);
       // A no-change re-check may have closed an obsolete update PR — drop it from the
       // cached model so the repo leaves Pending on the next reload (no full re-scan).
       if (result && result.closedPRs && result.closedPRs.length) {
