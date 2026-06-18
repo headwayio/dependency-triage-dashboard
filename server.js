@@ -15,7 +15,7 @@ const { run } = require("./lib/exec");
 const ci = require("./lib/ci");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
-const { createUnblockPR, createMajorUpgradePRs, dedupeMajors } = require("./lib/upgrader");
+const { createUnblockPR, createMajorUpgradePRs, dedupeMajors, majorsNeedingPR } = require("./lib/upgrader");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
 
@@ -1088,9 +1088,15 @@ const server = http.createServer(async (req, res) => {
       const r = await repoFromModel(repo);
       // One PR per distinct package — a package with several advisories is a single
       // upgrade — so the queued count + log match what actually gets opened.
-      const majors = dedupeMajors((r.packages || []).filter((p) => p.majorRequired));
-      if (!majors.length) {
+      const allMajors = dedupeMajors((r.packages || []).filter((p) => p.majorRequired));
+      if (!allMajors.length) {
         return sendJSON(res, 409, { error: "No major-required advisories for this repo." });
+      }
+      // Only open PRs for majors that don't already have one — so the queued count and
+      // log match what actually gets opened (no duplicates for already-open majors).
+      const majors = majorsNeedingPR(r, allMajors);
+      if (!majors.length) {
+        return sendJSON(res, 409, { error: "Every major upgrade for this repo already has an open PR." });
       }
       const job = startMajorUpgradeJob(r, majors);
       return sendJSON(res, 200, { jobId: job.id, repo, majors: majors.length });

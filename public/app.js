@@ -2150,6 +2150,18 @@ function openToolPRs(r, prefix) {
   return (r.openPRs || []).filter((p) => (p.headRefName || "").startsWith(prefix));
 }
 
+// Slugify exactly like lib/upgrader.js so a major package can be matched to its open
+// major-upgrade PR branch (major-upgrade/<eco>-<pkg>-<target>-<date>).
+const branchSlug = (s) => String(s).replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
+
+// The deduped majors that DON'T yet have an open major-upgrade PR — i.e. what an
+// "Upgrade majors" click would actually open. Matched by package (not the date-stamped
+// branch), so an already-open major is excluded even on a later day.
+function majorsNeedingPR(r, majors) {
+  const open = openToolPRs(r, "major-upgrade/");
+  return majors.filter((m) => !open.some((p) => p.headRefName.startsWith(`major-upgrade/${branchSlug(m.ecosystem)}-${branchSlug(m.pkg)}-`)));
+}
+
 function blockedAdvisories(r) {
   const list = r.blocked || [];
   if (!list.length) return "";
@@ -2226,11 +2238,13 @@ function majorRequiredAdvisories(r) {
   // has a PR, link instead of re-offering; while some remain, keep the button (it opens
   // PRs only for the missing ones) but note how many are open.
   const openPrs = canRemediate(r) ? openToolPRs(r, "major-upgrade/") : [];
+  // Only the majors still missing a PR are what a click opens — label + count reflect that.
+  const remaining = canRemediate(r) ? majorsNeedingPR(r, list) : list;
   const btn = !canRemediate(r)
     ? ""
-    : openPrs.length >= n
+    : remaining.length === 0
       ? `<a class="eol-pr-link" href="${esc(openPrs[0].url)}" target="_blank" rel="noopener" title="Major-upgrade PRs are open — review and merge them">⬆ ${openPrs.length} major PR${openPrs.length === 1 ? "" : "s"} open →</a>`
-      : `<button class="primary act-upgrade-majors" title="Open one draft PR per major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade major${n === 1 ? "" : "s"}${openPrs.length ? ` (${openPrs.length} open)` : ""}</button>`;
+      : `<button class="primary act-upgrade-majors" title="Open one draft PR per remaining major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade ${remaining.length} major${remaining.length === 1 ? "" : "s"}${openPrs.length ? ` (${openPrs.length} open)` : ""}</button>`;
   const head = srow(
     "warn",
     `⚠ ${n} major upgrade${n === 1 ? "" : "s"} required — no same-major security fix, so ${n === 1 ? "it was" : "they were"} left out ` +
@@ -2451,8 +2465,11 @@ async function onUnblockDeps(r) {
 async function onUpgradeMajors(r) {
   // One PR per distinct package — a package with several advisories is a single upgrade —
   // so the count + preview match what the server opens.
-  const majors = dedupeMajors((r.packages || []).filter((p) => p.majorRequired));
+  // Only open PRs for majors that don't already have one — exclude the already-open ones
+  // so the count, list, and confirm label match what actually gets opened.
+  const majors = majorsNeedingPR(r, dedupeMajors((r.packages || []).filter((p) => p.majorRequired)));
   const n = majors.length;
+  if (!n) { alert("Every major upgrade for this repo already has an open PR."); return; }
   const list = majors.slice(0, 8).map((p) => `• ${p.pkg} ${p.installed || "?"} → ${p.target || p.patched || "?"}`).join("\n");
   if (
     !(await confirmModal({
