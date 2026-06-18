@@ -2695,11 +2695,17 @@ async function onEmail(r, el, modeOverride) {
   }
 }
 
-// Tail-follow a log box: scroll it to the bottom ONLY if the user was already there,
-// and never let that nudge the page — restore window scroll if the browser tried to
-// bring the box into view. Keeps streaming output from yanking the reader around.
-function tailFollow(box) {
-  if (box.scrollHeight - box.scrollTop - box.clientHeight >= 24) return; // user scrolled up — leave it
+// Is the reader parked at the bottom of this log box? Measure this BEFORE appending,
+// so a tall just-added line (Claude output is long + pre-wrapped) can't be mistaken
+// for "the user scrolled up."
+function atBoxBottom(box) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+}
+
+// Pin a log box to its newest line. The box is its own overflow:auto scroller, so
+// scrollTop stays local — but restore the window scroll defensively in case the
+// browser tried to bring the box into view. Keeps the outer page from jumping.
+function pinBoxToBottom(box) {
   const x = window.scrollX;
   const y = window.scrollY;
   box.scrollTop = box.scrollHeight;
@@ -2707,12 +2713,12 @@ function tailFollow(box) {
 }
 
 function logLine(box, text, cls) {
-  const follow = box.scrollHeight - box.scrollTop - box.clientHeight < 24; // measure BEFORE appending
+  const follow = atBoxBottom(box); // decide BEFORE appending; the new line's height must not veto it
   const div = document.createElement("div");
   div.className = "line" + (cls ? " " + cls : "");
   div.textContent = text;
   box.appendChild(div);
-  if (follow) tailFollow(box);
+  if (follow) pinBoxToBottom(box); // already committed to following — pin unconditionally
 }
 
 // Kick off a background update-PR job. Returns immediately; progress streams in
@@ -3063,7 +3069,8 @@ function handleEvent(ev, box) {
     logLine(box, "ERROR: " + ev.message, "err");
   } else if (ev.type === "done") {
     if (ev.prUrl) {
-      logLine(box, "✓ Pull request opened", "success");
+      logLine(box, "✓ Pull request opened", "success"); // pins to bottom if following
+      const follow = atBoxBottom(box); // re-measure: logLine just pinned us there
       const a = document.createElement("a");
       a.href = ev.prUrl;
       a.target = "_blank";
@@ -3071,6 +3078,7 @@ function handleEvent(ev, box) {
       a.className = "pr-link";
       a.textContent = ev.prUrl;
       box.appendChild(a);
+      if (follow) pinBoxToBottom(box); // the raw <a> append must not veto the follow either
     } else if (ev.changed === false) {
       const n = (ev.notes || []).length;
       logLine(
@@ -3079,8 +3087,7 @@ function handleEvent(ev, box) {
         "warn"
       );
     }
-    // logLine already tail-follows; the prUrl branch appended a raw <a> without it.
-    if (ev.prUrl) tailFollow(box);
+    // Both the prUrl link and every logLine above already pin to the bottom when following.
   }
 }
 
