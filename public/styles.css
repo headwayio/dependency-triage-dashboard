@@ -156,6 +156,7 @@ table.pkgs td.ver-to { white-space: nowrap; }
   font-size: 12px;
   max-height: 320px;
   overflow: auto;
+  overflow-anchor: none; /* don't let streaming output nudge the page's scroll position */
   white-space: pre-wrap;
   word-break: break-word;
   display: none;
@@ -487,6 +488,9 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .srow.pr, .srow.info, .srow.todo { --rowbar: var(--accent); }
 .srow.ok { --rowbar: var(--ok); }
 .srow .lab { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; }
+/* Long paragraph labels (with inline <code>) need normal flow, not flex items. */
+.srow .lab.flow { display: block; }
+.srow .lab.flow code { white-space: nowrap; }
 .srow .lab.warn { color: var(--medium); }
 .srow .lab.danger { color: var(--danger); }
 .srow .lab.ok { color: var(--ok); }

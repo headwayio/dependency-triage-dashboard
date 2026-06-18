@@ -1818,10 +1818,13 @@ function wireContactForm(r, el) {
 
 // One status row: label on the left, optional meta + action right-aligned. `kind`
 // colors the label and the row's left tick (warn/danger/stale/ok/info/todo/pr/muted).
-function srow(kind, labHtml, right = "", meta = "") {
+// labClass "flow" switches the label from the default inline-flex (text + a trailing
+// badge on one baseline) to normal block flow — needed for long paragraph labels that
+// contain inline <code>, which inline-flex would split into gapped flex items.
+function srow(kind, labHtml, right = "", meta = "", labClass = "") {
   const r = (meta ? `<span class="srow-meta">${meta}</span>` : "") + (right || "");
   return (
-    `<div class="srow ${kind}"><span class="lab ${kind}">${labHtml}</span>` +
+    `<div class="srow ${kind}"><span class="lab ${kind}${labClass ? " " + labClass : ""}">${labHtml}</span>` +
     (r ? `<span class="srow-right">${r}</span>` : "") +
     `</div>`
   );
@@ -2083,7 +2086,9 @@ function blockedAdvisories(r) {
     "warn",
     `🚫 ${n} advisor${n === 1 ? "y" : "ies"} blocked by a manifest constraint — a same-major fix exists, but a ` +
       `Gemfile/<code>package.json</code> or parent-dependency range caps it. Bump the blocking constraint (or its parent), then re-run.`,
-    btn
+    btn,
+    "",
+    "flow"
   );
   const rows = list
     .map(
@@ -2126,7 +2131,9 @@ function majorRequiredAdvisories(r) {
     "warn",
     `⚠ ${n} major upgrade${n === 1 ? "" : "s"} required — no same-major security fix, so ${n === 1 ? "it was" : "they were"} left out ` +
       `of the lockfile-only PR. A major bump is likely breaking; review and opt in deliberately.`,
-    btn
+    btn,
+    "",
+    "flow"
   );
   const rows = list
     .map((p) => {
@@ -2614,12 +2621,24 @@ async function onEmail(r, el, modeOverride) {
   }
 }
 
+// Tail-follow a log box: scroll it to the bottom ONLY if the user was already there,
+// and never let that nudge the page — restore window scroll if the browser tried to
+// bring the box into view. Keeps streaming output from yanking the reader around.
+function tailFollow(box) {
+  if (box.scrollHeight - box.scrollTop - box.clientHeight >= 24) return; // user scrolled up — leave it
+  const x = window.scrollX;
+  const y = window.scrollY;
+  box.scrollTop = box.scrollHeight;
+  if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
+}
+
 function logLine(box, text, cls) {
+  const follow = box.scrollHeight - box.scrollTop - box.clientHeight < 24; // measure BEFORE appending
   const div = document.createElement("div");
   div.className = "line" + (cls ? " " + cls : "");
   div.textContent = text;
   box.appendChild(div);
-  box.scrollTop = box.scrollHeight;
+  if (follow) tailFollow(box);
 }
 
 // Kick off a background update-PR job. Returns immediately; progress streams in
@@ -2778,7 +2797,7 @@ function scheduleRender() {
 // set (reattachJobs) and re-enable sets (finishJob, handleJobEvent) can't drift.
 function setCardActionsDisabled(card, on) {
   card
-    .querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .act-dismiss, .dd-trigger")
+    .querySelectorAll(".cls-btn, .cls-opt, .act-notify, .act-email, .act-dismiss, .dd-trigger, .act-unblock, .act-upgrade-majors")
     .forEach((b) => (b.disabled = on));
 }
 
@@ -2986,7 +3005,8 @@ function handleEvent(ev, box) {
         "warn"
       );
     }
-    box.scrollTop = box.scrollHeight;
+    // logLine already tail-follows; the prUrl branch appended a raw <a> without it.
+    if (ev.prUrl) tailFollow(box);
   }
 }
 
