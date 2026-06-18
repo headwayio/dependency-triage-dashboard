@@ -52,8 +52,19 @@ every trigger and the shared pipeline is in
 
 This tool acts on **Dependabot security alerts** — the advisory feed
 (`/dependabot/alerts`, backed by GHSA/CVE entries). A package enters the dashboard
-**only if it has an open security advisory**; the model is built entirely from that
-feed, across every severity (critical → low — there's no severity floor).
+**only if it has an open security advisory**; the model is built (almost) entirely from
+that feed, across every severity (critical → low — there's no severity floor).
+
+> **The one exception: Hex (Elixir).** GitHub's dependency graph doesn't parse
+> `mix.lock`, so Dependabot never scans Hex — a repo's "0 hex alerts" means
+> *unscanned, not clean* (its SBOM shows zero hex packages even for a large Elixir
+> app). Because the alert feed is blind here, the tool scans Hex **itself**: it reads
+> each repo's committed `mix.lock` and cross-references the installed versions against
+> GitHub's Advisory Database under the `ERLANG` ecosystem — the same advisory data
+> Dependabot uses, just never auto-matched against `mix.lock`. The synthesized
+> advisories are merged into the model in the **same shape** as Dependabot alerts, so
+> Hex repos flow through the identical triage/tabs/update-PR machinery. See
+> [Hex / Elixir scanning](#hex--elixir-scanning). Turn it off with `"hexScan": false`.
 
 It deliberately does **not** touch Dependabot's other feature, **scheduled version
 updates** — the `dependabot/*` "Bump X from A to B" PRs your `.github/dependabot.yml`
@@ -82,7 +93,8 @@ merges a version-update PR.
   else needs it.
 - For the update PRs to actually change files, the relevant toolchain must be on
   your PATH: `npm`/`pnpm` for JS, `bundle` (or `mise`) for Ruby, `composer`,
-  `go`. Missing tools are skipped with a note in the run log — nothing breaks.
+  `go`, and `mix` (Elixir + Erlang, via `mise`) for Hex. Missing tools are skipped
+  with a note in the run log — nothing breaks.
 
 ## Credentials & local setup
 
@@ -267,6 +279,12 @@ auth.
    - **yarn** → Yarn Berry (≥2): `yarn up <pkgs> --mode=update-lockfile`. Yarn
      classic (1.x): noted for manual handling (use `resolutions` / upgrade the
      parent), since transitive dev-deps can't be safely lockfile-bumped in 1.x.
+   - **Hex (Elixir)** → `mix deps.update <pkgs>`, run under the repo's pinned
+     **Elixir + Erlang** (from `.tool-versions`/`.mise.toml`/`mix.exs`). The targeted
+     packages come from the tool's own Hex scan, not Dependabot — see
+     [Hex / Elixir scanning](#hex--elixir-scanning). A package a `mix.exs` constraint
+     caps below its patched floor is reported in the **Blocked** table for a manual
+     constraint bump (the Elixir analog of the gem/parent-constraint case).
 4. If nothing changed, it stops and tells you (no empty PR). On this no-change
    path it also **auto-closes any obsolete PR** the tool previously opened for the
    repo — a re-check that produces no diff means the flagged advisories are already
@@ -307,6 +325,38 @@ that happens, the tool writes `overrides` (npm) / `pnpm.overrides` (pnpm) /
 regenerates the lockfile — reaching transitive deps a normal update can't. A forced
 bump can break a dependent, so it opens as a **draft** for CI (and the auto-fix loop)
 to validate.
+
+### Hex / Elixir scanning
+Every other ecosystem rides GitHub's Dependabot **alert feed**. Hex can't: GitHub's
+dependency graph **doesn't parse `mix.lock`**, so Dependabot never scans Elixir — a
+repo's "0 hex alerts" means *unscanned, not clean* (its SBOM lists **zero** hex
+packages even for a large Elixir app). We confirmed there's no toggle for this: the
+[supported-ecosystems table](https://docs.github.com/en/code-security/dependabot/ecosystems-supported-by-dependabot/supported-ecosystems-and-repositories)
+lists Hex (`mix`) as **version-updates ✓ but security-updates ✗**, and pushing a
+`mix.lock` snapshot through the **Dependency Submission API** populates the SBOM yet
+still produces **no alerts** (tested: 79 hex packages ingested, 0 alerts after 10 min).
+
+So the tool closes the blind spot itself (`lib/hex.js`):
+
+1. **Scan.** For each candidate repo it reads the committed `mix.lock`, then matches
+   the installed versions against GitHub's Advisory Database under the **`ERLANG`**
+   ecosystem (pulled once via GraphQL, cached 6h) — the same advisory data Dependabot
+   would use, just never auto-matched against `mix.lock`. Each hit is synthesized into
+   the **same alert shape** as a Dependabot alert (severity, patched floor, GHSA, …),
+   so Hex repos appear in the dashboard and flow through triage/tabs/PRs unchanged.
+2. **Which repos.** Every repo whose **primary language is Elixir**, plus any repo
+   already surfaced by the Dependabot feed (so a polyglot app — JS frontend + Elixir
+   backend — is scanned too). A polyglot repo that is *neither* Elixir-primary *nor*
+   otherwise alerted won't be caught automatically; add it to `includeRepos`.
+3. **Remediate.** **Create update PR** runs `mix deps.update <pkgs>` (see above). A
+   patch held below its floor by a `mix.exs` constraint lands in the PR's **Blocked**
+   table; an advisory whose only fix is a **higher major** (e.g. `decimal 2 → 3`, which
+   needs coordinated bumps of its dependents) is held back under `minimizeMajorBumps`
+   and listed for manual opt-in.
+
+Disable the whole thing with `"hexScan": false`. The advisory query and every
+`mix.lock` read are best-effort — a failure degrades to "no hex advisories", never
+breaks a Refresh.
 
 ### Open update PRs for all (background jobs)
 **⚡ Open update PRs for all N** (atop the Untriaged and Maintained tabs) starts a
@@ -484,12 +534,14 @@ git-ignored, so your settings stay local):
 | `closeObsoletePRs` | `true` | on a no-change re-check, auto-close the tool's now-obsolete update PR for that repo (comment + delete branch); scoped to `branchPrefix` branches |
 | `nudgeDependabotOnClear` | `true` | on a no-change re-check, comment `@dependabot recreate` on the repo's open `dependabot/*` PRs **already satisfied on the default branch** so Dependabot self-closes them (deduped once/PR/day); still-needed/unverifiable PRs are left alone |
 | `minimizeMajorBumps` | `true` | apply only same-major security fixes automatically; hold back advisories whose only fix is a higher major (listed in the PR body for manual opt-in) |
+| `hexScan` | `true` | scan Hex (Elixir) repos against GitHub's `ERLANG` advisory DB (the Dependabot feed omits `mix.lock`) and merge the results into the model — see [Hex / Elixir scanning](#hex--elixir-scanning) |
 | `includeRepos` | `[]` | allowlist (empty = all repos with open alerts) |
 | `excludeRepos` | `[]` | repos to skip |
 | `branchPrefix` | `dependency-updates/soc2` | update-branch name prefix |
 | `npm.force` | `false` | add `--force` to `npm audit fix` (allows major bumps) |
 | `autoInstallRuby` | `true` | when a repo's pinned Ruby is missing, `mise install` it (slow; compiles Ruby). Set `false` to skip with instructions instead |
 | `autoInstallNode` / `autoInstallGo` / `autoInstallPhp` | `true` | same, for the pinned Node / Go / PHP toolchain |
+| `autoInstallElixir` | `true` | when a Hex update runs, `mise install` the repo's pinned Erlang + Elixir if missing. Set `false` to skip (the update no-ops without a toolchain) |
 | `maxConcurrentUpdates` | `3` | update/upgrade/bump jobs run at once (env `MAX_CONCURRENT_UPDATES` overrides) |
 | `maxConcurrentFixes` | `1` | CI-fix jobs run at once (a pool separate from updates) |
 | `autoFixCI` | `false` | auto-launch a headless Claude fix when a pending PR's CI fails |
