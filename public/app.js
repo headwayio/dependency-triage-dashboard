@@ -35,6 +35,12 @@ const ENG_LABEL = Object.fromEntries(ENGAGEMENTS);
 const ENG_RANK = Object.fromEntries(ENGAGEMENTS.map(([k], i) => [k, i]));
 // The Compliance tab is its own full-org inventory (not driven by the alert model).
 let STATE = { model: null, tab: "maintained", maxConcurrent: 3, ciStatus: {}, autoFixCI: false, maxAttempts: 2, eol: {}, autoUpgradeEOL: false, protection: {}, complianceData: null, complianceFilter: lsGet("compliance.filter", "all"), compSearch: lsGet("compliance.search", ""), compSort: { key: lsGet("compliance.sortKey", ""), dir: Number(lsGet("compliance.sortDir", "1")) || 1 }, alertSearch: "", compRows: [], compCursor: 0, compSelected: new Set() };
+// Hydrate the last-known CI status from the previous session so PRs render in their
+// correct lifecycle tab (Pending vs Passing) on the FIRST paint, instead of all landing
+// in Pending until the CI poll completes a few seconds later. The poll then corrects any
+// repo whose CI changed since. Stale entries for repos no longer pending are ignored —
+// bucketing requires r.pending from the (server-cached) model regardless.
+try { STATE.ciStatus = JSON.parse(lsGet("ci.status", "{}")) || {}; } catch { /* corrupt/absent cache */ }
 // Background update jobs, keyed by repo. Progress arrives over the global
 // /api/events stream and is buffered here so a tab switch / re-render (or a full
 // page reload) can rebuild each card's live log.
@@ -1974,6 +1980,7 @@ async function pollPRStatus(refresh) {
   try {
     const data = await getJSON("/api/pr-status" + (refresh ? "?refresh=1" : ""));
     STATE.ciStatus = data.statuses || {};
+    lsSet("ci.status", JSON.stringify(STATE.ciStatus)); // so next page load buckets PRs correctly on first paint
     STATE.autoFixCI = !!data.autoFixCI;
     renderAutoFixToggle();
     // Merge fresh per-PR draft/review state (kept live by the poll) into the model's
