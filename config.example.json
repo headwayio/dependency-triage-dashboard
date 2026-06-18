@@ -20,7 +20,7 @@
   "emailHourlyRate": 200,
   "npm": { "force": false },
   "autoFixCI": false,
-  "ciPollSeconds": 90,
+  "ciPollSeconds": 10,
   "maxConcurrentUpdates": 3,
   "maxConcurrentFixes": 1,
   "dismissToken": "",

@@ -3239,6 +3239,6 @@ async function loadEmailMode() {
   pollEolStatus(true); // end-of-life runtime scan
   pollProtectionStatus(); // branch-protection status (badges unprotected repos)
   loadComplianceData(); // pre-load the compliance inventory in the background (silent)
-  setInterval(() => pollPRStatus(), 30000);
+  setInterval(() => pollPRStatus(), 10000); // reads the server's batched cache (cheap)
   setInterval(() => pollEolStatus(), 120000);
 })();

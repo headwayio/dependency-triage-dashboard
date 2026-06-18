@@ -74,7 +74,7 @@ function loadConfig() {
     emailHourlyRate: 200,
     npm: { force: false },
     autoFixCI: false, // when true, auto-launch a headless Claude fix on a failing PR
-    ciPollSeconds: 90,
+    ciPollSeconds: 10,
     maxConcurrentFixes: 1,
     claudeFix: { permissionMode: "auto", timeoutMinutes: 12, maxAttemptsPerSha: 2, maxAttemptsPerRepo: 4 },
     autoUpgradeEOL: false, // when true, auto-open a runtime-upgrade PR for EOL runtimes
@@ -573,47 +573,53 @@ const STATE_RANK = { failing: 3, pending: 2, none: 1, unknown: 0, passing: 0 };
 async function pollCI() {
   if (!modelCache) return;
   const pending = modelCache.repos.filter((r) => !r.archived && r.pending && (r.openPRs || []).length);
-  for (const r of pending) {
-    const nwo = `${config.org}/${r.name}`;
-    let worst = null; // worst CI state across the repo's PRs → drives the badge
-    for (const pr of r.openPRs) {
-      if (!pr || !pr.number) continue;
-      let st;
-      try {
-        st = await ci.fetchPRStatus(nwo, pr.number);
-      } catch {
-        continue;
-      }
-      // Keep the PR's draft / review state fresh on each poll (not just on a full
-      // Refresh) so review requests and draft→ready flips show up live.
-      if (st.state !== "unknown") {
-        pr.draft = st.isDraft;
-        pr.reviewDecision = st.reviewDecision;
-        pr.reviewers = st.reviewers || [];
-        // Per-PR check state — each open PR has its own check run, so the card can show a
-        // badge on every PR, not just the repo's "worst" on the first chip.
-        pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
-      }
-      if (!worst || (STATE_RANK[st.state] || 0) > (STATE_RANK[worst.state] || 0)) worst = st;
-
-      if (
-        config.autoFixCI &&
-        st.state === "failing" &&
-        st.headSha &&
-        !activeFixJob(r.name) &&
-        state.fixAttemptCount(r.name, st.headSha) < (config.claudeFix.maxAttemptsPerSha || 2) &&
-        state.fixTotalForRepo(r.name) < (config.claudeFix.maxAttemptsPerRepo || 4)
-      ) {
-        const branch = await prBranch(nwo, pr.number);
-        if (!branch) continue;
-        pr.headRefName = branch;
-        const failingLogs = await ci.fetchFailingLogs(nwo, st.failing);
-        startFixJob(r, pr, st, failingLogs);
-        break; // one fix session per repo at a time
-      }
+  if (!pending.length) return;
+  // Fetch every pending PR's review + CI state in ONE GraphQL call so the poll cost is
+  // one request per cycle, not one `gh pr view` per PR — what makes a fast cadence safe.
+  const items = [];
+  for (const r of pending) for (const pr of r.openPRs) if (pr && pr.number) items.push({ r, pr, nwo: `${config.org}/${r.name}`, number: pr.number });
+  let statuses = await ci.fetchPRStatusBatch(items.map((x) => ({ nwo: x.nwo, number: x.number })));
+  if (!statuses) {
+    // Total GraphQL failure — fall back to per-PR so a transient error doesn't freeze
+    // every badge for this cycle.
+    statuses = new Map();
+    for (const it of items) {
+      try { statuses.set(`${it.nwo}#${it.number}`, await ci.fetchPRStatus(it.nwo, it.number)); } catch { /* skip this PR */ }
     }
-    if (worst) ciStatus.set(r.name, { ...worst, at: Date.now() });
   }
+  const worstByRepo = new Map();
+  const fixStarted = new Set(); // one fix session per repo per pass
+  for (const it of items) {
+    const { r, pr, nwo } = it;
+    const st = statuses.get(`${nwo}#${it.number}`);
+    if (!st || st.state === "unknown") continue;
+    // Keep each PR's draft / review / check state fresh on every poll (not just on a full
+    // Refresh) so review requests, draft→ready flips, and CI results show up live.
+    pr.draft = st.isDraft;
+    pr.reviewDecision = st.reviewDecision;
+    pr.reviewers = st.reviewers || [];
+    pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
+    const w = worstByRepo.get(r.name);
+    if (!w || (STATE_RANK[st.state] || 0) > (STATE_RANK[w.state] || 0)) worstByRepo.set(r.name, st);
+
+    if (
+      config.autoFixCI &&
+      st.state === "failing" &&
+      st.headSha &&
+      !fixStarted.has(r.name) &&
+      !activeFixJob(r.name) &&
+      state.fixAttemptCount(r.name, st.headSha) < (config.claudeFix.maxAttemptsPerSha || 2) &&
+      state.fixTotalForRepo(r.name) < (config.claudeFix.maxAttemptsPerRepo || 4)
+    ) {
+      const branch = await prBranch(nwo, pr.number);
+      if (!branch) continue;
+      pr.headRefName = branch;
+      const failingLogs = await ci.fetchFailingLogs(nwo, st.failing);
+      startFixJob(r, pr, st, failingLogs);
+      fixStarted.add(r.name);
+    }
+  }
+  for (const [name, worst] of worstByRepo) ciStatus.set(name, { ...worst, at: Date.now() });
 }
 
 // ---- Runtime end-of-life detection + auto-upgrade ---------------------------
@@ -657,7 +663,8 @@ function startEolPoller() {
 
 let ciPollTimer = null;
 function startCIPoller() {
-  const ms = Math.max(30, Number(config.ciPollSeconds || 90)) * 1000;
+  // GraphQL batches all pending PRs into one request per cycle, so a fast cadence is cheap.
+  const ms = Math.max(5, Number(config.ciPollSeconds || 10)) * 1000;
   const tick = () => pollCI().catch(() => {}).finally(() => { ciPollTimer = setTimeout(tick, ms); });
   ciPollTimer = setTimeout(tick, 5000); // first poll shortly after boot
 }
