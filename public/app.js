@@ -2337,7 +2337,20 @@ async function onUnblockDeps(r) {
 // Upgrade major-required advisories: one high-effort headless Claude session + draft PR
 // PER major package, so each breaking upgrade is isolated and independently reviewable.
 async function onUpgradeMajors(r) {
-  const majors = (r.packages || []).filter((p) => p.majorRequired);
+  // One PR per distinct package — a package with several advisories is a single upgrade.
+  // Keep the highest required version so the count + preview match what the server opens.
+  const verGt = (a, b) => {
+    const pa = String(a).split(/[.\-]/).map((x) => Number(x) || 0);
+    const pb = String(b).split(/[.\-]/).map((x) => Number(x) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0; }
+    return false;
+  };
+  const byPkg = new Map();
+  for (const p of (r.packages || []).filter((p) => p.majorRequired)) {
+    const cur = byPkg.get(p.pkg);
+    if (!cur || verGt(p.target || p.patched || "0", cur.target || cur.patched || "0")) byPkg.set(p.pkg, p);
+  }
+  const majors = [...byPkg.values()];
   const n = majors.length;
   const list = majors.slice(0, 8).map((p) => `• ${p.pkg} ${p.installed || "?"} → ${p.target || p.patched || "?"}`).join("\n");
   if (
