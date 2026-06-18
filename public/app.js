@@ -1661,20 +1661,33 @@ function ecoText(eco) {
     .join(" · ");
 }
 
+// Renders the bump type as a small badge; major/minor stand out, a forced major
+// (no same-major security fix) is flagged red so you can eyeball the breaking ones.
+function bumpCell(p) {
+  const b = p.bump || "";
+  if (!b) return "—";
+  if (p.majorRequired) return `<span class="bump major req" title="No same-major security fix — a major upgrade is required. Opt in manually.">major ⚠</span>`;
+  if (b === "major" || b === "minor") return `<span class="bump ${b}">${b}</span>`;
+  return `<span class="bump patch">patch</span>`;
+}
+
 function pkgTable(pkgs) {
   const rows = pkgs
-    .map(
-      (p) => `<tr>
+    .map((p) => {
+      const to = p.target || p.patched;
+      return `<tr>
         <td><span class="sev-dot ${esc(p.severity)}"></span>${esc(p.severity)}</td>
         <td>${esc(p.ecosystem)}</td>
         <td><code>${esc(p.pkg)}</code></td>
-        <td>${p.patched ? "→ " + esc(p.patched) : "—"}</td>
+        <td class="ver-from">${p.installed ? esc(p.installed) : "—"}</td>
+        <td class="ver-to">${to ? "→ " + esc(to) : "—"}</td>
+        <td>${bumpCell(p)}</td>
         <td>${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.ghsa || "view")}</a>` : esc(p.ghsa || "")}</td>
-      </tr>`
-    )
+      </tr>`;
+    })
     .join("");
   return `<table class="pkgs">
-      <thead><tr><th>Sev</th><th>Ecosystem</th><th>Package</th><th>Patched</th><th>Advisory</th></tr></thead>
+      <thead><tr><th>Sev</th><th>Ecosystem</th><th>Package</th><th>From</th><th>To</th><th>Bump</th><th>Advisory</th></tr></thead>
       <tbody>${rows}</tbody></table>`;
 }
 
@@ -1892,9 +1905,13 @@ function prChips(r) {
       const right =
         (i === 0 ? ci.btn : "") +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
+      const title = (pr.title || "").trim();
+      const titleHtml = title
+        ? ` <span class="pr-title" title="${esc(title)}">${esc(title.length > 56 ? title.slice(0, 55) + "…" : title)}</span>`
+        : "";
       return srow(
         "pr",
-        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${reviewBadge(pr)}${ciText}`,
+        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${titleHtml}${reviewBadge(pr)}${ciText}`,
         right
       );
     })
@@ -1988,14 +2005,19 @@ function renderAutoFixToggle() {
 function eolBadge(r) {
   const findings = STATE.eol[r.name];
   if (!findings || !findings.length) return "";
+  const openPRs = r.openPRs || [];
   return findings
-    .map((f) =>
-      srow(
-        "danger",
-        `⚠ ${esc(f.id)} <span class="ver">${esc(f.pinned)}</span> is end-of-life${f.eolDate ? ` · ${esc(String(f.eolDate).slice(0, 7))}` : ""} <span class="srow-arrow">→ <span class="ver">${esc(f.target.version)}</span>${f.target.lts ? " LTS" : ""}</span>`,
-        `<button class="eol-upgrade-btn" data-id="${esc(f.id)}" title="Open a runtime-upgrade PR: rewrites the pin + regenerates lockfiles under the new version">⬆ Propose upgrade</button>`
-      )
-    )
+    .map((f) => {
+      // If a runtime-upgrade PR for THIS runtime is already open, the upgrade is in
+      // flight — show a link to it instead of inviting a duplicate "Propose upgrade".
+      const pr = openPRs.find((p) => (p.headRefName || "").startsWith(`runtime-upgrade/${f.id}-`));
+      const label = `⚠ ${esc(f.id)} <span class="ver">${esc(f.pinned)}</span> is end-of-life${f.eolDate ? ` · ${esc(String(f.eolDate).slice(0, 7))}` : ""} <span class="srow-arrow">→ <span class="ver">${esc(f.target.version)}</span>${f.target.lts ? " LTS" : ""}</span>`;
+      const right = pr
+        ? `<a class="eol-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener" title="A runtime-upgrade PR for ${esc(f.id)} is already open — review and merge it">⬆ upgrade in PR #${esc(String(pr.number))} →</a>`
+        : `<button class="eol-upgrade-btn" data-id="${esc(f.id)}" title="Open a runtime-upgrade PR: rewrites the pin + regenerates lockfiles under the new version">⬆ Propose upgrade</button>`;
+      // Amber ("in progress") once a PR exists; red ("needs action") otherwise.
+      return srow(pr ? "warn" : "danger", label, right);
+    })
     .join("");
 }
 
@@ -2029,13 +2051,94 @@ function dispoBumpNote(r) {
   return srow("info", `<span${list ? ` title="${esc(list)}"` : ""}>🔧 Constraint-bump PR${prNum} raises the gemspec to admit ${n} blocked patch${n === 1 ? "" : "es"} — review &amp; merge.</span>`);
 }
 
+// Remediation buttons appear only on repos we actually patch (maintained, or pending =
+// maintained with an in-flight PR) — never monitored/notified/ignored/untriaged.
+function canRemediate(r) {
+  return !r.archived && (r.classification === "maintained" || r.pending);
+}
+
+// A run left flagged advisories below their patched floor: a same-major fix exists
+// but a Gemfile/package.json or parent-dependency constraint caps it. Distinct from a
+// gem's "blocked" disposition (that's a gemspec the gem itself must bump). Renders a
+// summary tick + an inline table with the full detail (mirrors the PR's Blocked table).
+function blockedAdvisories(r) {
+  const list = r.blocked || [];
+  if (!list.length) return "";
+  const n = list.length;
+  const btn = canRemediate(r)
+    ? `<button class="primary act-unblock" title="Open a draft PR that raises the blocking manifest/parent constraints (high-effort Claude session), then let CI iterate">🔧 Try to unblock</button>`
+    : "";
+  const head = srow(
+    "warn",
+    `🚫 ${n} advisor${n === 1 ? "y" : "ies"} blocked by a manifest constraint — a same-major fix exists, but a ` +
+      `Gemfile/<code>package.json</code> or parent-dependency range caps it. Bump the blocking constraint (or its parent), then re-run.`,
+    btn
+  );
+  const rows = list
+    .map(
+      (b) => `<tr>
+        <td>${esc(b.ecosystem)}</td>
+        <td><code>${esc(b.pkg)}</code></td>
+        <td class="ver-from">${b.resolved ? esc(b.resolved) : "—"}</td>
+        <td class="ver-to">→ ≥ ${esc(b.floor)}</td>
+        <td class="blk-why">${esc(b.reason || "")}</td>
+      </tr>`
+    )
+    .join("");
+  const table =
+    `<table class="pkgs blocked-table">` +
+    `<thead><tr><th>Ecosystem</th><th>Package</th><th>Resolved</th><th>Needs</th><th>Why it's blocked</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
+  return head + table;
+}
+
+// Advisories whose only fix crosses a major (no same-major patch). Held out of the
+// lockfile-only PR and listed for a deliberate opt-in — mirrors the PR body's
+// "Major upgrades required" table. Data comes from the per-package majorRequired flag
+// the model already carries (no run needed), so it shows on every tab, not just Pending.
+function majorRequiredAdvisories(r) {
+  const list = (r.packages || []).filter((p) => p.majorRequired);
+  if (!list.length) return "";
+  const n = list.length;
+  const btn = canRemediate(r)
+    ? `<button class="primary act-upgrade-majors" title="Open one draft PR per major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade major${n === 1 ? "" : "s"}</button>`
+    : "";
+  const head = srow(
+    "warn",
+    `⚠ ${n} major upgrade${n === 1 ? "" : "s"} required — no same-major security fix, so ${n === 1 ? "it was" : "they were"} left out ` +
+      `of the lockfile-only PR. A major bump is likely breaking; review and opt in deliberately.`,
+    btn
+  );
+  const rows = list
+    .map((p) => {
+      const to = p.target || p.patched || "?";
+      const adv = p.url
+        ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.ghsa || "view")}</a>`
+        : esc(p.ghsa || "");
+      return `<tr>
+        <td>${esc(p.ecosystem)}</td>
+        <td><code>${esc(p.pkg)}</code></td>
+        <td class="ver-from">${p.installed ? esc(p.installed) : "—"}</td>
+        <td class="ver-to">→ ${esc(to)}</td>
+        <td>${adv}</td>
+      </tr>`;
+    })
+    .join("");
+  const table =
+    `<table class="pkgs major-table">` +
+    `<thead><tr><th>Ecosystem</th><th>Package</th><th>Current</th><th>Required</th><th>Advisory</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
+  return head + table;
+}
+
 // ---- card status list ---------------------------------------------------------
 // One flat list, ordered by urgency: attention items (amber/red ticks, each with its
 // action button), then the in-flight PR rows (blue), then resting notes (green/muted).
 // The colored left tick per row replaces the old labeled zone boxes.
 function statusRows(r) {
   const rows =
-    eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + classifyPrompt(r) + monitoredStale(r) +
+    eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + blockedAdvisories(r) + majorRequiredAdvisories(r) +
+    classifyPrompt(r) + monitoredStale(r) +
     prChips(r) + dispoBumpNote(r) +
     dispoCovered(r) + monitoredNotified(r);
   return rows ? `<div class="ar-status">${rows}</div>` : "";
@@ -2433,8 +2536,22 @@ function logLine(box, text, cls) {
 // over /api/events (see startEventStream/handleJobEvent), so the work survives
 // tab switches and even a full page reload.
 async function onUpdate(r, el) {
-  if (!(await confirmModal({ message: `Open a dependency-update PR for ${r.nameWithOwner}?\n\nClones the repo, branches, runs lockfile-only updates for the ${r.packages.length} flagged package(s), pushes, and opens a DRAFT pull request. Runs in the background — you can keep working.`, confirmLabel: "Create update PR" })))
-    return;
+  // Mirror the card button's verb: an open PR → "Re-run" (refresh it), a covered/
+  // blocked gem with no PR → "Re-check" (re-resolve), otherwise → "Create".
+  const n = r.packages ? r.packages.length : 0;
+  const d = r.disposition;
+  let confirmLabel, message;
+  if (r.pending) {
+    confirmLabel = "Re-run update";
+    message = `Re-run the dependency update for ${r.nameWithOwner}?\n\nA PR already exists. This re-clones, re-runs lockfile-only updates for the ${n} flagged package(s), and refreshes that PR's branch (force-with-lease) — or, if the advisories are already resolved, closes the now-obsolete PR. Runs in the background — you can keep working.`;
+  } else if (d && (d.state === "covered" || d.state === "blocked")) {
+    confirmLabel = "Re-check";
+    message = `Re-check ${r.nameWithOwner}?\n\nRe-clones and re-resolves this gem's disposition against the current advisories. It only opens a PR if an actual change is produced. Runs in the background.`;
+  } else {
+    confirmLabel = "Create update PR";
+    message = `Open a dependency-update PR for ${r.nameWithOwner}?\n\nClones the repo, branches, runs lockfile-only updates for the ${n} flagged package(s), pushes, and opens a DRAFT pull request. Runs in the background — you can keep working.`;
+  }
+  if (!(await confirmModal({ message, confirmLabel }))) return;
   JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: "⏳ Starting…", level: "info" }] });
   reattachJobs();
   try {
@@ -2616,7 +2733,7 @@ function finishJob(repo, evt) {
     // them until the next Refresh. Mirrors the server-side merge in runJob.
     r.openPRs = r.openPRs || [];
     if (!r.openPRs.some((p) => p.url === evt.prUrl)) {
-      r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true });
+      r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "" });
     }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (r && evt.disposition) {
@@ -2627,6 +2744,9 @@ function finishJob(repo, evt) {
   } else if (closedAny) {
     // Re-render so the closed PR drops and the repo leaves Pending; this also
     // rebuilds the card with its action buttons re-enabled.
+    scheduleRender();
+  } else if (r && r.blocked && r.blocked.length) {
+    // No PR, but the run surfaced blocked survivors — re-render so the card shows them.
     scheduleRender();
   } else {
     // No PR produced (no changes / manual remediation) — re-enable in place.

@@ -284,8 +284,20 @@ auth.
    `"nudgeDependabotOnClear": false`.
 5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`
 
-The PR body lists every advisory it targeted and reminds reviewers to let CI run
-before merging. The branch is per-day; a same-day re-run refreshes it.
+**Minimize major bumps.** Security fixes that exist **within the installed major**
+are applied automatically. An advisory whose only fix is in a **higher major**
+(no same-major backport — e.g. `devise 4.9.4 → 5.0.4`, where GitHub's affected
+range covers all of 4.x) is **held back**: it's excluded from this lockfile-only PR
+and listed in the PR body under *"Major upgrades required — not included here"* so
+you can opt in deliberately. This determination uses GitHub's range-specific
+`first_patched_version` (the floor for *your* version): if its major is higher than
+installed, the current major has no fix. Disable with `"minimizeMajorBumps": false`.
+
+The PR body lists every advisory it targeted — with **From / To / Bump** columns
+(major/minor bolded so you can eyeball breaking-risk vs patch) — and reminds
+reviewers to let CI run before merging. The same From/To/Bump detail (and a red
+**major ⚠** flag on forced majors) shows on each repo card's flagged-packages table
+in the dashboard. The branch is per-day; a same-day re-run refreshes it.
 
 **npm-ecosystem overrides fallback.** Most npm/pnpm/yarn advisories are on
 *transitive* dependencies a targeted `update` can't move (a parent's version range
@@ -471,6 +483,7 @@ git-ignored, so your settings stay local):
 | `draftPRs` | `true` | open every PR (update, upgrade, bump) as a draft |
 | `closeObsoletePRs` | `true` | on a no-change re-check, auto-close the tool's now-obsolete update PR for that repo (comment + delete branch); scoped to `branchPrefix` branches |
 | `nudgeDependabotOnClear` | `true` | on a no-change re-check, comment `@dependabot recreate` on the repo's open `dependabot/*` PRs **already satisfied on the default branch** so Dependabot self-closes them (deduped once/PR/day); still-needed/unverifiable PRs are left alone |
+| `minimizeMajorBumps` | `true` | apply only same-major security fixes automatically; hold back advisories whose only fix is a higher major (listed in the PR body for manual opt-in) |
 | `includeRepos` | `[]` | allowlist (empty = all repos with open alerts) |
 | `excludeRepos` | `[]` | repos to skip |
 | `branchPrefix` | `dependency-updates/soc2` | update-branch name prefix |

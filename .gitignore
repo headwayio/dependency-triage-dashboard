@@ -15,6 +15,7 @@ compliance.json
 classifications.json
 ignored.json
 dispositions.json
+blocked.json
 dismissals.json
 bump-attempts.json
 upgrade-attempts.json

@@ -62,6 +62,7 @@ function loadConfig() {
     draftPRs: true,
     closeObsoletePRs: true, // a no-change re-check closes any now-obsolete tool update PR
     nudgeDependabotOnClear: true, // ...and asks Dependabot to re-evaluate/close its superseded PRs
+    minimizeMajorBumps: true, // hold back advisories whose only fix is a major bump (opt in manually)
     alertState: "open",
     includeRepos: [],
     excludeRepos: [],
@@ -387,6 +388,22 @@ function runJob(job) {
         const sig = state.dispositionSig(job.model.packages);
         job.model.disposition = state.recordDisposition(job.model.name, { ...result.disposition, sig });
         maybeAutoBump(job.model); // blocked gem → auto-open a constraint-bump PR (if enabled)
+      }
+      // Persist the run's blocked survivors (advisories a manifest constraint caps
+      // below their patched floor) so the card surfaces them on the next reload.
+      // An update job always reports `blocked` (possibly empty → clears any stale list).
+      if (result && Array.isArray(result.blocked)) {
+        const sig = state.blockedSig(job.model.packages);
+        state.recordBlocked(job.model.name, result.blocked, sig);
+        job.model.blocked = result.blocked.length ? result.blocked : null;
+      }
+      // A no-change run re-fetched this repo's alerts in place (result.refreshed). The
+      // served model is alert-driven — a repo with 0 open alerts and no in-flight PR is
+      // exactly what buildModel would exclude — so drop it from the cache to match a full
+      // Refresh and keep a reload consistent with the live card update.
+      if (result && result.refreshed && modelCache && job.model.counts && job.model.counts.total === 0 && !job.model.pending) {
+        const i = modelCache.repos.indexOf(job.model);
+        if (i >= 0) modelCache.repos.splice(i, 1);
       }
     } catch (e) {
       job.error = e.message;

@@ -133,6 +133,13 @@ main { padding: 16px 24px 80px; margin: 0; }
 table.pkgs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
 table.pkgs th, table.pkgs td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 table.pkgs th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+table.pkgs td.ver-from { color: var(--muted); white-space: nowrap; }
+table.pkgs td.ver-to { white-space: nowrap; }
+.pkgs .bump { font-size: 11px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+.pkgs .bump.major { color: var(--danger); font-weight: 700; }
+.pkgs .bump.minor { color: var(--medium); font-weight: 600; }
+.pkgs .bump.patch { color: var(--muted); }
+.pkgs .bump.req { background: rgba(179, 38, 30, 0.16); }
 .sev-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .sev-dot.critical { background: var(--critical); }
 .sev-dot.high { background: var(--high); }
@@ -239,6 +246,8 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 /* End-of-life runtime upgrade button */
 .eol-upgrade-btn { margin-left: auto; font-size: 12px; padding: 3px 11px; border-radius: 6px; background: var(--danger); border-color: var(--danger); color: #fff; }
 .eol-upgrade-btn:hover { background: var(--danger); filter: brightness(1.1); }
+.eol-pr-link { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+.eol-pr-link:hover { text-decoration: underline; }
 
 /* Gem disposition action buttons (covered → dismiss, blocked → bump). Both render
    with the .primary class, which out-specifies a single class — so they're accent
@@ -457,6 +466,13 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .ar-status { display: flex; flex-direction: column; margin-top: 2px; }
 .ar-status:empty { display: none; }
 
+/* Inline detail tables under their amber summary ticks (Blocked + Major-required).
+   Aligned to the row text via a small left indent; the reason column wraps, rest don't. */
+.blocked-table, .major-table { margin: 4px 0 8px 13px; width: calc(100% - 13px); font-size: 12px; }
+.blocked-table td.blk-why { color: var(--muted); white-space: normal; }
+.blocked-table td.ver-to { color: var(--medium); font-weight: 600; }
+.major-table td.ver-to { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
 /* Status rows: label left, action right; a thin colored tick on the row's left edge
    encodes its kind (amber = needs a decision, red = urgent, blue = PR/info, green = ok)
    — replaces the old labeled zone boxes without losing the color coding. */
@@ -482,6 +498,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .srow .lab a { color: inherit; }
 .srow .lab a:hover { text-decoration: underline; }
 .srow .srow-arrow { color: var(--muted); }
+.srow .pr-title { color: var(--muted); font-weight: 400; }
 .srow .srow-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .srow button { font-size: 12px; padding: 3px 11px; white-space: nowrap; }
 .srow .ci-fix-btn, .srow .ci-fixing, .srow .ci-capped { white-space: nowrap; }
