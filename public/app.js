@@ -1991,8 +1991,10 @@ async function pollPRStatus(refresh) {
     if (snap !== STATE._ciSnap) {
       STATE._ciSnap = snap;
       // A fresh CI result or approval can move a repo between the PR-lifecycle tabs, so
-    // refresh tabs+counts too, not just the current tab's cards.
-    if (PR_TABS.has(STATE.tab) && STATE.model) render(); // refresh on change
+    // refresh tabs+counts too, not just the current tab's cards. Use scheduleRender (not
+    // render) so this poll-driven rebuild preserves the user's scroll position — a bare
+    // render() here jumps the page on every CI/review change while you're on a PR tab.
+    if (PR_TABS.has(STATE.tab) && STATE.model) scheduleRender(); // refresh on change (scroll-safe)
     }
   } catch {
     /* server momentarily unavailable */
