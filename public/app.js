@@ -5,19 +5,22 @@ const lsGet = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { r
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode / disabled */ } };
 const SEVS = ["critical", "high", "medium", "low"];
 // Archived repos drop out of GitHub's alert feed entirely, so there's no archived
-// tab. "Pending PR" holds repos with an open update PR from this tool, awaiting merge.
+// tab. Repos with an open tool PR split across two tabs: "Approved PR" (a PR is
+// approved → ready to merge) and "Pending PR" (still in review / being fixed).
 const TABS = [
   { key: "untriaged", label: "Untriaged" },
   { key: "maintained", label: "Maintained" },
   { key: "pending", label: "Pending PR" },
+  { key: "approved", label: "Approved PR" },
   { key: "covered", label: "Covered" },
   { key: "monitored", label: "Monitored" },
   { key: "notified", label: "Notified" },
   { key: "compliance", label: "🛡 Compliance" },
   { key: "ignored", label: "Ignored" },
 ];
-// Tabs that only appear once they hold something (resting/catch-all buckets).
-const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered"]);
+// Tabs that only appear once they hold something (resting/catch-all buckets). The
+// Approved PR tab surfaces only when a PR is actually ready to merge.
+const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered", "approved"]);
 // Engagement (Track-as) states + action labels — MUST match lib/state.js VALID (the
 // /api/classify contract). NOTE: TABS above intentionally uses different display text
 // ("Maintained" vs "Maintain"); do not derive one from the other.
@@ -163,13 +166,18 @@ function partition() {
   // A maintained gem whose constraints already permit every patch needs no action —
   // it rests in "Covered" instead of cluttering the active Maintained worklist.
   const covered = (r) => r.disposition && r.disposition.state === "covered";
-  // An open PR takes FULL precedence: a pending repo stays in "Pending PR" no matter
-  // its classification (so reclassifying it doesn't move it out — classification just
-  // decides which tab it lands in once the PR merges). Every other tab excludes pending.
+  // A repo whose tool PR is APPROVED is ready to merge; everything else with an open
+  // PR is still in review or being fixed.
+  const prApproved = (r) => (r.openPRs || []).some((pr) => pr.reviewDecision === "APPROVED");
+  // An open PR takes FULL precedence: a repo with one stays in the Pending/Approved PR
+  // tabs no matter its classification (so reclassifying it doesn't move it out —
+  // classification just decides where it lands once the PR merges). Every other tab
+  // excludes both PR buckets.
   return {
     untriaged: active.filter((r) => !r.pending && cls(r) === "untriaged"),
     maintained: active.filter((r) => !r.pending && cls(r) === "maintained" && !covered(r)),
-    pending: active.filter((r) => r.pending),
+    pending: active.filter((r) => r.pending && !prApproved(r)),
+    approved: active.filter((r) => r.pending && prApproved(r)),
     covered: active.filter((r) => !r.pending && cls(r) === "maintained" && covered(r)),
     monitored: active.filter((r) => !r.pending && cls(r) === "monitored" && !notifiedCurrent(r)),
     notified: active.filter((r) => !r.pending && cls(r) === "monitored" && notifiedCurrent(r)),
@@ -227,8 +235,9 @@ async function loadRepos(refresh) {
 // until merged). Only ignored/archived repos are excluded.
 function renderSummary() {
   const p = partition();
-  // "To maintain" = only what we actually patch: Maintained + Pending.
-  const t = summaryOf([...p.maintained, ...p.pending]);
+  // "To maintain" = only what we actually patch: Maintained + both PR buckets
+  // (Pending + Approved still count as open work until the PR merges).
+  const t = summaryOf([...p.maintained, ...p.pending, ...p.approved]);
 
   $("#summary").innerHTML = `
     <div class="stat"><div class="n">${t.repos}</div><div class="l">to maintain</div></div>
@@ -275,7 +284,7 @@ function renderTabs() {
         if (STATE.tab !== b.dataset.tab) { STATE.compCursor = 0; STATE.compSelected.clear(); STATE.alertSearch = ""; }
         STATE.tab = b.dataset.tab;
         render();
-        if (STATE.tab === "pending") pollPRStatus(true); // freshen CI badges on entry
+        if (STATE.tab === "pending" || STATE.tab === "approved") pollPRStatus(true); // freshen CI/review badges on entry
       })
     );
 }
@@ -337,7 +346,8 @@ function renderCards() {
     const msg = {
       untriaged: "Nothing to triage — every repo is classified 🎉",
       maintained: "No actively-maintained repos with open alerts 🎉",
-      pending: "No open update PRs. Create one from a Maintained repo and it'll land here awaiting merge.",
+      pending: "No update PRs in progress. Create one from a Maintained repo and it'll land here while in review.",
+      approved: "Nothing ready to merge yet. An open PR moves here once it's approved.",
       covered: "No covered gems. A maintained gem whose constraints already permit every patch rests here.",
       monitored: "No monitored repos need a notice. Mark an inactive-client repo as “Monitor” to track it here.",
       notified: "No notifications sent yet. On a Monitored repo, copy the client email, then “Mark notified.”",
@@ -361,14 +371,15 @@ function renderCards() {
     `</div>` +
     `<div class="comp-selbar"${STATE.compSelected.size ? "" : " hidden"}>${STATE.compSelected.size ? selBarHtml() : ""}</div>`;
   content.appendChild(bar);
-  // Branch protection only applies to maintained/pending — surface "protect all" there.
-  if (STATE.tab === "maintained" || STATE.tab === "pending") {
+  // Branch protection only applies to maintained/pending/approved — surface "protect all" there.
+  if (STATE.tab === "maintained" || STATE.tab === "pending" || STATE.tab === "approved") {
     const unprotected = (STATE.model.repos || []).filter(
       (r) => !r.archived && (r.classification === "maintained" || r.pending) && STATE.protection[r.name] && STATE.protection[r.name].protected === false
     );
     if (unprotected.length) content.appendChild(protectAllBar(unprotected));
   }
-  if (STATE.tab === "pending") content.appendChild(pendingToolbar(full));
+  // Both PR tabs get the copy/open-all-PRs toolbar (Approved is the merge worklist).
+  if (STATE.tab === "pending" || STATE.tab === "approved") content.appendChild(pendingToolbar(full));
   if (STATE.tab === "untriaged" || STATE.tab === "maintained") content.appendChild(fixAllToolbar(full));
 
   const ordered = nestedOrder(list);
@@ -1855,7 +1866,8 @@ function monitoredNotified(r) {
 // so the per-card status banners don't have to restate it.
 const TAB_INTROS = {
   maintained: "Repos you actively maintain — open update PRs and keep the default branch protected.",
-  pending: "Repos with an open update PR, awaiting review and merge.",
+  pending: "Repos with an open update PR still in review or being fixed.",
+  approved: "Repos whose update PR is approved — ready to merge.",
   monitored: "Inactive-client repos you watch but don't patch — email the client, then mark them notified.",
   notified: "Monitored repos whose client has already been emailed about these vulnerabilities.",
   ignored: "Repos that are out of scope for this tool.",
@@ -1967,7 +1979,9 @@ async function pollPRStatus(refresh) {
     const snap = JSON.stringify(STATE.ciStatus) + "|" + JSON.stringify(data.prMeta || {});
     if (snap !== STATE._ciSnap) {
       STATE._ciSnap = snap;
-      if (STATE.tab === "pending" && STATE.model) renderCards(); // refresh badges only on change
+      // A fresh approval can move a repo pending→approved, so refresh tabs+counts too,
+    // not just the current tab's cards.
+    if ((STATE.tab === "pending" || STATE.tab === "approved") && STATE.model) render(); // refresh on change
     }
   } catch {
     /* server momentarily unavailable */
