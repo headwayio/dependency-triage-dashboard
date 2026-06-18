@@ -15,7 +15,7 @@ const { run } = require("./lib/exec");
 const ci = require("./lib/ci");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
-const { createUnblockPR, createMajorUpgradePRs } = require("./lib/upgrader");
+const { createUnblockPR, createMajorUpgradePRs, dedupeMajors } = require("./lib/upgrader");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
 
@@ -1033,7 +1033,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && route === "/api/upgrade-majors") {
       const { repo } = await repoBody(req);
       const r = await repoFromModel(repo);
-      const majors = (r.packages || []).filter((p) => p.majorRequired);
+      // One PR per distinct package — a package with several advisories is a single
+      // upgrade — so the queued count + log match what actually gets opened.
+      const majors = dedupeMajors((r.packages || []).filter((p) => p.majorRequired));
       if (!majors.length) {
         return sendJSON(res, 409, { error: "No major-required advisories for this repo." });
       }

@@ -2168,23 +2168,47 @@ function blockedAdvisories(r) {
   return head + table;
 }
 
+// Loose "a newer than b" for version strings (numeric segments; non-numeric → 0).
+function verGt(a, b) {
+  const pa = String(a).split(/[.\-]/).map((x) => Number(x) || 0);
+  const pb = String(b).split(/[.\-]/).map((x) => Number(x) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0; }
+  return false;
+}
+
+// Collapse the major-required advisories to ONE entry per package — that's a single
+// upgrade (one PR), even when several advisories flag it. Keep the highest required
+// version and gather every advisory so the count + table match what we actually open.
+// Mirrors lib/upgrader.js dedupeMajors.
+function dedupeMajors(list) {
+  const byPkg = new Map();
+  for (const p of list || []) {
+    const cur = byPkg.get(p.pkg);
+    if (!cur) { byPkg.set(p.pkg, { ...p, advisories: p.ghsa ? [{ ghsa: p.ghsa, url: p.url }] : [] }); continue; }
+    if (p.ghsa && !cur.advisories.some((a) => a.ghsa === p.ghsa)) cur.advisories.push({ ghsa: p.ghsa, url: p.url });
+    if (verGt(p.target || p.patched || "0", cur.target || cur.patched || "0")) { cur.target = p.target; cur.patched = p.patched; }
+  }
+  return [...byPkg.values()];
+}
+
 // Advisories whose only fix crosses a major (no same-major patch). Held out of the
 // lockfile-only PR and listed for a deliberate opt-in — mirrors the PR body's
 // "Major upgrades required" table. Data comes from the per-package majorRequired flag
 // the model already carries (no run needed), so it shows on every tab, not just Pending.
 function majorRequiredAdvisories(r) {
-  const list = (r.packages || []).filter((p) => p.majorRequired);
-  if (!list.length) return "";
+  const raw = (r.packages || []).filter((p) => p.majorRequired);
+  if (!raw.length) return "";
+  // Count + list DISTINCT package upgrades (= one PR each), not raw advisories — a gem
+  // flagged by two advisories is still one upgrade.
+  const list = dedupeMajors(raw);
   const n = list.length;
-  // One major-upgrade PR is opened per distinct package. Reflect how many are already
-  // in flight: once every distinct major has a PR, link instead of re-offering; while
-  // some remain uncovered, keep the button (it opens PRs only for the missing ones) but
-  // note how many are open.
+  // Reflect how many major-upgrade PRs are already in flight: once every distinct major
+  // has a PR, link instead of re-offering; while some remain, keep the button (it opens
+  // PRs only for the missing ones) but note how many are open.
   const openPrs = canRemediate(r) ? openToolPRs(r, "major-upgrade/") : [];
-  const distinct = new Set(list.map((p) => p.pkg)).size;
   const btn = !canRemediate(r)
     ? ""
-    : openPrs.length >= distinct
+    : openPrs.length >= n
       ? `<a class="eol-pr-link" href="${esc(openPrs[0].url)}" target="_blank" rel="noopener" title="Major-upgrade PRs are open — review and merge them">⬆ ${openPrs.length} major PR${openPrs.length === 1 ? "" : "s"} open →</a>`
       : `<button class="primary act-upgrade-majors" title="Open one draft PR per major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade major${n === 1 ? "" : "s"}${openPrs.length ? ` (${openPrs.length} open)` : ""}</button>`;
   const head = srow(
@@ -2198,9 +2222,10 @@ function majorRequiredAdvisories(r) {
   const rows = list
     .map((p) => {
       const to = p.target || p.patched || "?";
-      const adv = p.url
-        ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.ghsa || "view")}</a>`
-        : esc(p.ghsa || "");
+      const advs = (p.advisories && p.advisories.length ? p.advisories : (p.ghsa ? [{ ghsa: p.ghsa, url: p.url }] : []));
+      const adv = advs
+        .map((a) => (a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.ghsa)}</a>` : esc(a.ghsa || "")))
+        .join(", ") || "—";
       return `<tr>
         <td>${esc(p.ecosystem)}</td>
         <td><code>${esc(p.pkg)}</code></td>
@@ -2404,20 +2429,9 @@ async function onUnblockDeps(r) {
 // Upgrade major-required advisories: one high-effort headless Claude session + draft PR
 // PER major package, so each breaking upgrade is isolated and independently reviewable.
 async function onUpgradeMajors(r) {
-  // One PR per distinct package — a package with several advisories is a single upgrade.
-  // Keep the highest required version so the count + preview match what the server opens.
-  const verGt = (a, b) => {
-    const pa = String(a).split(/[.\-]/).map((x) => Number(x) || 0);
-    const pb = String(b).split(/[.\-]/).map((x) => Number(x) || 0);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0; }
-    return false;
-  };
-  const byPkg = new Map();
-  for (const p of (r.packages || []).filter((p) => p.majorRequired)) {
-    const cur = byPkg.get(p.pkg);
-    if (!cur || verGt(p.target || p.patched || "0", cur.target || cur.patched || "0")) byPkg.set(p.pkg, p);
-  }
-  const majors = [...byPkg.values()];
+  // One PR per distinct package — a package with several advisories is a single upgrade —
+  // so the count + preview match what the server opens.
+  const majors = dedupeMajors((r.packages || []).filter((p) => p.majorRequired));
   const n = majors.length;
   const list = majors.slice(0, 8).map((p) => `• ${p.pkg} ${p.installed || "?"} → ${p.target || p.patched || "?"}`).join("\n");
   if (
