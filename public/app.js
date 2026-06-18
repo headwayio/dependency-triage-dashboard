@@ -20,9 +20,10 @@ const TABS = [
   { key: "compliance", label: "🛡 Compliance" },
   { key: "ignored", label: "Ignored" },
 ];
-// Tabs that only appear once they hold something (resting/catch-all buckets). The
-// Passing/Approved PR tabs surface only as PRs progress down the lifecycle.
-const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered", "passing", "approved"]);
+// Tabs that only appear once they hold something (resting/catch-all buckets). The three
+// PR-lifecycle tabs (Pending/Passing/Approved) always show, so the bar is stable and a PR
+// visibly advances through fixed columns rather than tabs popping in and out.
+const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered"]);
 // The three PR-lifecycle tabs — they share CI/review polling, the PR toolbar, and
 // the branch-protection bar. Bucketing among them depends on live CI + review state.
 const PR_TABS = new Set(["pending", "passing", "approved"]);
