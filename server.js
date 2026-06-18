@@ -15,6 +15,7 @@ const { run } = require("./lib/exec");
 const ci = require("./lib/ci");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
+const { createUnblockPR, createMajorUpgradePRs } = require("./lib/upgrader");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
 
@@ -326,6 +327,50 @@ function startBumpJob(repoModel, blocked) {
   return job;
 }
 
+/** Start an UNBLOCK job: one high-effort headless Claude session that raises the
+ *  manifest/parent constraints capping same-major security patches, then opens one PR. */
+function startUnblockJob(repoModel, blocked) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `unblock-${++jobSeq}`,
+    kind: "unblock",
+    repo: repoModel.name,
+    model: repoModel,
+    blocked: blocked || [],
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "unblock" });
+  jobEmit(job, "log", { line: `⏳ Queued — unblocking ${(blocked || []).length} constraint-capped patch(es) (max effort)…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
+/** Start a MAJOR-upgrade job: one high-effort headless session + PR PER package, so
+ *  each breaking upgrade is isolated and independently reviewable. */
+function startMajorUpgradeJob(repoModel, packages) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `major-${++jobSeq}`,
+    kind: "major",
+    repo: repoModel.name,
+    model: repoModel,
+    packages: packages || [],
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "major" });
+  jobEmit(job, "log", { line: `⏳ Queued — ${(packages || []).length} major upgrade(s), one PR each (max effort)…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
 /** A blocked gem (a gemspec constraint caps a dep below its patch) auto-opens a
  *  constraint-bump PR when enabled — the actionable remediation chosen for blocked
  *  gems. Deduped by advisory signature so it never re-fires for the same set. */
@@ -361,19 +406,27 @@ function runJob(job) {
       const result =
         job.kind === "bump"
           ? await createConstraintBumpPR({ config, repo: job.model, blocked: job.blocked, emit })
-          : await createUpdatePR({ config, repo: job.model, emit, upgrade: job.upgrade });
+          : job.kind === "unblock"
+            ? await createUnblockPR({ config, repo: job.model, blocked: job.blocked, emit })
+            : job.kind === "major"
+              ? await createMajorUpgradePRs({ config, repo: job.model, packages: job.packages, emit })
+              : await createUpdatePR({ config, repo: job.model, emit, upgrade: job.upgrade });
       job.result = result;
       job.status = "done";
-      // Reflect a newly-opened PR in the cached model immediately so a reload
-      // (which reads the cache) keeps the repo in Pending, independent of
-      // GitHub's PR-search index catching up. Merge (don't clobber) so a runtime
-      // upgrade PR can coexist with a dependency-update PR.
-      if (result && result.prUrl) {
-        const num = (result.prUrl.match(/\/pull\/(\d+)/) || [])[1];
-        const entry = { number: num ? Number(num) : null, url: result.prUrl, draft: !!config.draftPRs };
+      // Reflect newly-opened PR(s) in the cached model immediately so a reload
+      // (which reads the cache) keeps the repo in Pending, independent of GitHub's
+      // PR-search index catching up. Merge (don't clobber) so a runtime upgrade,
+      // a major-upgrade fan-out (prUrls[]), and a dependency-update PR can coexist.
+      const newUrls = [result && result.prUrl, ...((result && result.prUrls) || [])].filter(Boolean);
+      if (newUrls.length) {
         job.model.pending = true;
         job.model.openPRs = job.model.openPRs || [];
-        if (!job.model.openPRs.some((p) => p.url === result.prUrl)) job.model.openPRs.push(entry);
+        for (const url of newUrls) {
+          const num = (url.match(/\/pull\/(\d+)/) || [])[1];
+          if (!job.model.openPRs.some((p) => p.url === url)) {
+            job.model.openPRs.push({ number: num ? Number(num) : null, url, draft: !!config.draftPRs });
+          }
+        }
       }
       // A no-change re-check may have closed an obsolete update PR — drop it from the
       // cached model so the repo leaves Pending on the next reload (no full re-scan).
@@ -951,6 +1004,31 @@ const server = http.createServer(async (req, res) => {
       state.recordBump(repo, sig);
       const job = startBumpJob(r, d.blocked || []);
       return sendJSON(res, 200, { jobId: job.id, repo, blocked: (d.blocked || []).length });
+    }
+
+    // Unblock constraint-capped (same-major) security patches via a high-effort Claude
+    // session — one PR raising the blocking manifest/parent constraints.
+    if (req.method === "POST" && route === "/api/unblock-deps") {
+      const { repo } = await repoBody(req);
+      const r = await repoFromModel(repo);
+      const blocked = r.blocked || [];
+      if (!blocked.length) {
+        return sendJSON(res, 409, { error: "No blocked advisories for this repo — run an update first so the survivors are detected." });
+      }
+      const job = startUnblockJob(r, blocked);
+      return sendJSON(res, 200, { jobId: job.id, repo, blocked: blocked.length });
+    }
+
+    // Upgrade major-required advisories via high-effort Claude sessions — one PR per major.
+    if (req.method === "POST" && route === "/api/upgrade-majors") {
+      const { repo } = await repoBody(req);
+      const r = await repoFromModel(repo);
+      const majors = (r.packages || []).filter((p) => p.majorRequired);
+      if (!majors.length) {
+        return sendJSON(res, 409, { error: "No major-required advisories for this repo." });
+      }
+      const job = startMajorUpgradeJob(r, majors);
+      return sendJSON(res, 200, { jobId: job.id, repo, majors: majors.length });
     }
 
     // Branch-protection status for every in-scope repo (cached; ?refresh=1 re-checks).

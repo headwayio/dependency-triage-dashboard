@@ -2288,6 +2288,62 @@ async function onBumpConstraints(r, el) {
   }
 }
 
+// Unblock constraint-capped (same-major) security patches: a high-effort headless
+// Claude session raises the blocking manifest/parent constraints and opens one draft PR.
+async function onUnblockDeps(r) {
+  const n = (r.blocked || []).length;
+  if (
+    !(await confirmModal({
+      confirmLabel: "Unblock deps",
+      message:
+        `Open an "unblock" PR for ${r.nameWithOwner}?\n\n` +
+        `A headless Claude session (max effort) raises the manifest/parent constraint(s) capping ${n} same-major security patch(es), regenerates the lockfile, and pushes a DRAFT PR — which then flows into the CI auto-fix loop. Stays within the current major. Runs in the background.`,
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: "⏳ Starting unblock session…", level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/unblock-deps", { repo: r.name });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "unblock";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the unblock session: " + e.message);
+  }
+}
+
+// Upgrade major-required advisories: one high-effort headless Claude session + draft PR
+// PER major package, so each breaking upgrade is isolated and independently reviewable.
+async function onUpgradeMajors(r) {
+  const majors = (r.packages || []).filter((p) => p.majorRequired);
+  const n = majors.length;
+  const list = majors.slice(0, 8).map((p) => `• ${p.pkg} ${p.installed || "?"} → ${p.target || p.patched || "?"}`).join("\n");
+  if (
+    !(await confirmModal({
+      confirmLabel: `Upgrade ${n} major${n === 1 ? "" : "s"}`,
+      message:
+        `Open one draft PR per major upgrade for ${r.nameWithOwner}? (${n})\n\n${list}${n > 8 ? "\n…" : ""}\n\n` +
+        `Each is a separate high-effort (max) headless Claude session that raises the constraint, installs, and updates this repo's code/tests for the breaking changes — then opens its own DRAFT PR so you can merge the green ones independently. This runs the sessions one after another and can take a while. Runs in the background.`,
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting ${n} major upgrade session(s)…`, level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/upgrade-majors", { repo: r.name });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "major";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the major upgrades: " + e.message);
+  }
+}
+
 async function onFixCI(r) {
   if (!(await confirmModal({ message: `Launch a headless Claude session to fix the failing CI checks on ${r.nameWithOwner}?\n\nIt edits the PR branch in a local checkout and pushes — CI then re-runs.`, confirmLabel: "Fix CI" }))) return;
   try {
@@ -2409,6 +2465,8 @@ function card(r, nesting) {
   on(".act-update", onUpdate);
   on(".act-dismiss", onDismissAlerts);
   on(".act-bump", onBumpConstraints);
+  on(".act-unblock", onUnblockDeps);
+  on(".act-upgrade-majors", onUpgradeMajors);
   el.querySelectorAll(".act-email").forEach((b) => b.addEventListener("click", () => onEmail(r, el)));
   el.querySelectorAll(".cls-btn, .cls-opt").forEach((b) =>
     b.addEventListener("click", () => onClassify(r, el, b.dataset.state))
@@ -2669,7 +2727,7 @@ function cardEl(repo) {
 // Busy label for a card's CTA button while its background job is queued/running.
 function jobBusyHtml(status, kind) {
   if (status === "queued") return "⏳ Queued";
-  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…" }[kind] || "Working…";
+  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…", unblock: "🔧 Unblocking…", major: "⬆ Upgrading majors…" }[kind] || "Working…";
   return `<span class="spin"></span>${label}`;
 }
 
@@ -2705,7 +2763,7 @@ function reattachJobs() {
       box.innerHTML = "";
       for (const ev of job.events) handleEvent(ev, box);
     }
-    const btn = card.querySelector(".act-update, .act-bump");
+    const btn = card.querySelector(".act-update, .act-bump, .act-unblock, .act-upgrade-majors");
     if (btn) {
       btn.disabled = true;
       btn.innerHTML = jobBusyHtml(job.status, job.kind);
@@ -2754,7 +2812,17 @@ function finishJob(repo, evt) {
     if (r.openPRs) r.openPRs = r.openPRs.filter((p) => !closed.has(p.url));
     r.pending = !!(r.openPRs && r.openPRs.length);
   }
-  if (evt.prUrl && r) {
+  if (r && evt.prUrls && evt.prUrls.length) {
+    // Major-upgrade fan-out: one PR per major. Merge them all into openPRs (don't clobber).
+    r.pending = true;
+    r.openPRs = r.openPRs || [];
+    for (const url of evt.prUrls) {
+      if (r.openPRs.some((p) => p.url === url)) continue;
+      const num = (url.match(/\/pull\/(\d+)/) || [])[1];
+      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true });
+    }
+    scheduleRender(); // graduates the repo into the Pending PR tab
+  } else if (evt.prUrl && r) {
     const num = (evt.prUrl.match(/\/pull\/(\d+)/) || [])[1];
     r.pending = true;
     // Merge (don't clobber): a repo can have several open tool PRs — a runtime
@@ -2802,7 +2870,7 @@ function handleJobEvent(evt) {
   if (evt.type === "status") {
     job.status = evt.status;
     const card = cardEl(repo);
-    const btn = card && card.querySelector(".act-update, .act-bump");
+    const btn = card && card.querySelector(".act-update, .act-bump, .act-unblock, .act-upgrade-majors");
     if (btn && (evt.status === "queued" || evt.status === "running")) {
       btn.disabled = true;
       btn.innerHTML = jobBusyHtml(job.status, job.kind);

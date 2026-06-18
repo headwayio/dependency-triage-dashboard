@@ -27,6 +27,8 @@
   "eolPollHours": 12,
   "autoFixGemConstraints": false,
   "claudeBump": { "permissionMode": "auto", "timeoutMinutes": 20 },
+  "claudeUnblock": { "permissionMode": "auto", "effort": "max", "timeoutMinutes": 30 },
+  "claudeMajor": { "permissionMode": "auto", "effort": "max", "timeoutMinutes": 40 },
   "protection": {
     "rulesetName": "SOC 2 — protected default branch",
     "requiredApprovals": 1,
