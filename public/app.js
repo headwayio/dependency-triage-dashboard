@@ -2061,13 +2061,24 @@ function canRemediate(r) {
 // but a Gemfile/package.json or parent-dependency constraint caps it. Distinct from a
 // gem's "blocked" disposition (that's a gemspec the gem itself must bump). Renders a
 // summary tick + an inline table with the full detail (mirrors the PR's Blocked table).
+// Open PRs this tool opened for a given branch family (unblock / major-upgrade), so
+// the card can show "PR already open" instead of inviting a duplicate run.
+function openToolPRs(r, prefix) {
+  return (r.openPRs || []).filter((p) => (p.headRefName || "").startsWith(prefix));
+}
+
 function blockedAdvisories(r) {
   const list = r.blocked || [];
   if (!list.length) return "";
   const n = list.length;
-  const btn = canRemediate(r)
-    ? `<button class="primary act-unblock" title="Open a draft PR that raises the blocking manifest/parent constraints (high-effort Claude session), then let CI iterate">🔧 Try to unblock</button>`
-    : "";
+  // An unblock PR is already in flight — link to it instead of offering to start another
+  // (the server would skip the session anyway). Mirrors the EOL "upgrade in PR" pattern.
+  const openPr = canRemediate(r) ? openToolPRs(r, "dependency-unblock/")[0] : null;
+  const btn = !canRemediate(r)
+    ? ""
+    : openPr
+      ? `<a class="eol-pr-link" href="${esc(openPr.url)}" target="_blank" rel="noopener" title="An unblock PR is already open — review and merge it">🔧 unblock in PR #${esc(String(openPr.number))} →</a>`
+      : `<button class="primary act-unblock" title="Open a draft PR that raises the blocking manifest/parent constraints (high-effort Claude session), then let CI iterate">🔧 Try to unblock</button>`;
   const head = srow(
     "warn",
     `🚫 ${n} advisor${n === 1 ? "y" : "ies"} blocked by a manifest constraint — a same-major fix exists, but a ` +
@@ -2100,9 +2111,17 @@ function majorRequiredAdvisories(r) {
   const list = (r.packages || []).filter((p) => p.majorRequired);
   if (!list.length) return "";
   const n = list.length;
-  const btn = canRemediate(r)
-    ? `<button class="primary act-upgrade-majors" title="Open one draft PR per major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade major${n === 1 ? "" : "s"}</button>`
-    : "";
+  // One major-upgrade PR is opened per distinct package. Reflect how many are already
+  // in flight: once every distinct major has a PR, link instead of re-offering; while
+  // some remain uncovered, keep the button (it opens PRs only for the missing ones) but
+  // note how many are open.
+  const openPrs = canRemediate(r) ? openToolPRs(r, "major-upgrade/") : [];
+  const distinct = new Set(list.map((p) => p.pkg)).size;
+  const btn = !canRemediate(r)
+    ? ""
+    : openPrs.length >= distinct
+      ? `<a class="eol-pr-link" href="${esc(openPrs[0].url)}" target="_blank" rel="noopener" title="Major-upgrade PRs are open — review and merge them">⬆ ${openPrs.length} major PR${openPrs.length === 1 ? "" : "s"} open →</a>`
+      : `<button class="primary act-upgrade-majors" title="Open one draft PR per major upgrade (high-effort Claude sessions that update code/tests for the breaking changes), then let CI iterate">⬆ Upgrade major${n === 1 ? "" : "s"}${openPrs.length ? ` (${openPrs.length} open)` : ""}</button>`;
   const head = srow(
     "warn",
     `⚠ ${n} major upgrade${n === 1 ? "" : "s"} required — no same-major security fix, so ${n === 1 ? "it was" : "they were"} left out ` +
@@ -2816,11 +2835,12 @@ function finishJob(repo, evt) {
     // Major-upgrade fan-out: one PR per major. Merge them all into openPRs (don't clobber).
     r.pending = true;
     r.openPRs = r.openPRs || [];
-    const titleFor = new Map((evt.prs || []).map((p) => [p.url, p.title]));
+    const metaFor = new Map((evt.prs || []).map((p) => [p.url, p]));
     for (const url of evt.prUrls) {
       if (r.openPRs.some((p) => p.url === url)) continue;
       const num = (url.match(/\/pull\/(\d+)/) || [])[1];
-      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true, title: titleFor.get(url) || "" });
+      const m = metaFor.get(url) || {};
+      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true, title: m.title || "", headRefName: m.branch || null });
     }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (evt.prUrl && r) {
