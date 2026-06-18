@@ -169,6 +169,16 @@ function confirmModal(opts = {}) {
   });
 }
 
+// A single PR's lifecycle state, in precedence order: APPROVED (reviewed → ready to
+// merge) > PASSING (green CI, not yet approved) > pending (CI running/failing/unknown).
+// CI comes from the per-PR pr.ci that pollCI stamps; the repo-level STATE.ciStatus is only
+// a cold-load fallback before the first poll has attached per-PR status.
+function prLifecycleState(pr, repo) {
+  if (pr.reviewDecision === "APPROVED") return "approved";
+  const ci = (pr.ci && pr.ci.state) || (STATE.ciStatus[repo.name] && STATE.ciStatus[repo.name].state);
+  return ci === "passing" ? "passing" : "pending";
+}
+
 // ---- partitioning (the single source of truth for tabs + counts) ------------
 function partition() {
   const repos = (STATE.model && STATE.model.repos) || [];
@@ -178,21 +188,18 @@ function partition() {
   // A maintained gem whose constraints already permit every patch needs no action —
   // it rests in "Covered" instead of cluttering the active Maintained worklist.
   const covered = (r) => r.disposition && r.disposition.state === "covered";
-  // The PR lifecycle, in precedence order: APPROVED (reviewed → ready to merge) beats
-  // PASSING (CI green, not yet approved) beats everything else still in flight. CI state
-  // comes from STATE.ciStatus (kept live by pollPRStatus), keyed by repo name; a repo
-  // whose CI we haven't polled yet stays in Pending until the status arrives.
-  const prApproved = (r) => (r.openPRs || []).some((pr) => pr.reviewDecision === "APPROVED");
-  const ciPassing = (r) => { const s = STATE.ciStatus[r.name]; return !!(s && s.state === "passing"); };
-  // An open PR takes FULL precedence: a repo with one stays in the PR lifecycle tabs no
-  // matter its classification (so reclassifying it doesn't move it out — classification
-  // just decides where it lands once the PR merges). Every other tab excludes them.
+  // PR-lifecycle bucketing is PER PR: a repo with PRs in different states appears in EACH
+  // matching tab (so a failing PR is never hidden behind an approved sibling). A tab holds
+  // the repos that have ≥1 PR in that state; the card there shows only that state's PRs
+  // (prChips filters by STATE.tab) while keeping all the repo detail — flagged packages,
+  // the live CI-fix log, blocked/major tables. hasPRIn = "this repo has a PR in <state>".
+  const hasPRIn = (r, st) => (r.openPRs || []).some((pr) => prLifecycleState(pr, r) === st);
   return {
     untriaged: active.filter((r) => !r.pending && cls(r) === "untriaged"),
     maintained: active.filter((r) => !r.pending && cls(r) === "maintained" && !covered(r)),
-    pending: active.filter((r) => r.pending && !prApproved(r) && !ciPassing(r)),
-    passing: active.filter((r) => r.pending && !prApproved(r) && ciPassing(r)),
-    approved: active.filter((r) => r.pending && prApproved(r)),
+    pending: active.filter((r) => r.pending && hasPRIn(r, "pending")),
+    passing: active.filter((r) => r.pending && hasPRIn(r, "passing")),
+    approved: active.filter((r) => r.pending && hasPRIn(r, "approved")),
     covered: active.filter((r) => !r.pending && cls(r) === "maintained" && covered(r)),
     monitored: active.filter((r) => !r.pending && cls(r) === "monitored" && !notifiedCurrent(r)),
     notified: active.filter((r) => !r.pending && cls(r) === "monitored" && notifiedCurrent(r)),
@@ -250,9 +257,11 @@ async function loadRepos(refresh) {
 // until merged). Only ignored/archived repos are excluded.
 function renderSummary() {
   const p = partition();
-  // "To maintain" = only what we actually patch: Maintained + every PR-lifecycle
-  // bucket (Pending/Passing/Approved all count as open work until the PR merges).
-  const t = summaryOf([...p.maintained, ...p.pending, ...p.passing, ...p.approved]);
+  // "To maintain" counts REPOS: Maintained + every repo with an open PR. A repo can sit in
+  // more than one PR-lifecycle bucket (PRs in different states), so count unique pending
+  // repos directly rather than summing the buckets (which would double-count).
+  const prRepos = ((STATE.model && STATE.model.repos) || []).filter((r) => !r.archived && r.pending);
+  const t = summaryOf([...p.maintained, ...prRepos]);
 
   $("#summary").innerHTML = `
     <div class="stat"><div class="n">${t.repos}</div><div class="l">to maintain</div></div>
@@ -387,16 +396,21 @@ function renderCards() {
     `</div>` +
     `<div class="comp-selbar"${STATE.compSelected.size ? "" : " hidden"}>${STATE.compSelected.size ? selBarHtml() : ""}</div>`;
   content.appendChild(bar);
-  // The PR-lifecycle tabs (Pending/Passing/Approved) and Maintained get branch-protection
-  // and copy/open-all-PRs affordances; PR_TABS is the shared set.
+  // Maintained + the PR-lifecycle tabs surface the "protect all unprotected" bar.
   if (STATE.tab === "maintained" || PR_TABS.has(STATE.tab)) {
     const unprotected = (STATE.model.repos || []).filter(
       (r) => !r.archived && (r.classification === "maintained" || r.pending) && STATE.protection[r.name] && STATE.protection[r.name].protected === false
     );
     if (unprotected.length) content.appendChild(protectAllBar(unprotected));
   }
-  // Every PR-lifecycle tab gets the copy/open-all-PRs toolbar (Approved is the merge worklist).
-  if (PR_TABS.has(STATE.tab)) content.appendChild(pendingToolbar(full));
+  // PR-lifecycle tabs get a copy/open-all bar scoped to THIS tab's PRs (the ones each
+  // visible card actually shows — i.e. PRs whose state matches the tab).
+  if (PR_TABS.has(STATE.tab)) {
+    const entries = list.flatMap((r) =>
+      (r.openPRs || []).filter((pr) => prLifecycleState(pr, r) === STATE.tab).map((pr) => ({ repo: r, pr }))
+    );
+    if (entries.length) content.appendChild(prEntryToolbar(entries));
+  }
   if (STATE.tab === "untriaged" || STATE.tab === "maintained") content.appendChild(fixAllToolbar(full));
 
   const ordered = nestedOrder(list);
@@ -447,6 +461,39 @@ function renderCards() {
   wireSearch(bar, (v) => { STATE.alertSearch = v; }, renderCards); // term is ephemeral (cleared on tab switch)
   reattachJobs(); // restore live logs for any in-flight update jobs
   scrollCursorIntoView();
+}
+
+// Copy / open-all for exactly the PRs shown in THIS PR-lifecycle tab (the ones whose state
+// matches the tab, across every visible card). Open goes server-side so it isn't popup-blocked.
+function prEntryToolbar(entries) {
+  const n = entries.length;
+  const bar = document.createElement("div");
+  bar.className = "pending-toolbar";
+  bar.innerHTML =
+    `<button class="copy-all">⧉ Copy all ${n} PR link${n === 1 ? "" : "s"}</button>` +
+    `<button class="open-all">↗ Open all ${n} in browser</button>` +
+    `<span class="toolbar-hint">paste into Slack, or open every PR in your default browser</span>`;
+  bar.querySelector(".copy-all").addEventListener("click", (e) => {
+    const html = entries.map((x) => anchorHtml(x.pr.url, prLabel(x.repo, x.pr))).join("<br>");
+    const plain = entries.map((x) => x.pr.url).join("\n");
+    copyRich(html, plain, e.currentTarget, `✓ Copied ${n} link${n === 1 ? "" : "s"}`);
+  });
+  bar.querySelector(".open-all").addEventListener("click", async (e) => {
+    const urls = entries.map((x) => x.pr.url).filter(Boolean);
+    if (!urls.length) return;
+    if (urls.length > 5 && !(await confirmModal({ message: `Open all ${urls.length} pull requests as new browser tabs?`, confirmLabel: "Open all" }))) return;
+    const btn = e.currentTarget;
+    const restore = btnBusy(btn, "Opening…");
+    try {
+      const data = await postJSON("/api/open-urls", { urls });
+      btn.textContent = `✓ Opened ${data.opened}`;
+      setTimeout(restore, 2000);
+    } catch (err) {
+      restore();
+      alert("Couldn't open the PRs: " + err.message);
+    }
+  });
+  return bar;
 }
 
 // Ignored repos that have NO open alerts, so they never appear in the alert model — pulled
@@ -1622,54 +1669,6 @@ async function copyRich(html, plain, btn, okLabel = "✓ Copied") {
 const prLabel = (r, pr) => `${r.nameWithOwner}#${pr.number}`;
 const anchorHtml = (url, label) => `<a href="${esc(url)}">${esc(label)}</a>`;
 
-// Rich HTML (one linked label per line) + plain-text URLs for the whole pending list.
-function buildPendingLinks(list) {
-  const html = [];
-  const plain = [];
-  for (const r of list) {
-    for (const pr of r.openPRs || []) {
-      html.push(anchorHtml(pr.url, prLabel(r, pr)));
-      plain.push(pr.url);
-    }
-  }
-  return { html: html.join("<br>"), plain: plain.join("\n") };
-}
-
-// "Copy all PR links" + "Open all in browser" bar above the Pending tab's cards.
-function pendingToolbar(list) {
-  const n = list.reduce((s, r) => s + (r.openPRs ? r.openPRs.length : 0), 0);
-  const bar = document.createElement("div");
-  bar.className = "pending-toolbar";
-  bar.innerHTML =
-    `<button class="copy-all">⧉ Copy all ${n} PR link${n > 1 ? "s" : ""}</button>` +
-    `<button class="open-all">↗ Open all ${n} in browser</button>` +
-    `<span class="toolbar-hint">paste into Slack, or open every PR in your default browser</span>`;
-  bar.querySelector(".copy-all").addEventListener("click", (e) => {
-    const { html, plain } = buildPendingLinks(list);
-    copyRich(html, plain, e.currentTarget, `✓ Copied ${n} link${n > 1 ? "s" : ""}`);
-  });
-  bar.querySelector(".open-all").addEventListener("click", (e) => onOpenAllPRs(list, e.currentTarget));
-  return bar;
-}
-
-// Open every pending PR as a new tab in the OS default browser (server-side, so
-// it isn't popup-blocked like a loop of window.open() would be).
-async function onOpenAllPRs(list, btn) {
-  const urls = [];
-  for (const r of list) for (const pr of r.openPRs || []) if (pr.url) urls.push(pr.url);
-  if (!urls.length) return;
-  if (urls.length > 5 && !(await confirmModal({ message: `Open all ${urls.length} pull requests as new browser tabs?`, confirmLabel: "Open all" }))) return;
-  const restore = btnBusy(btn, "Opening…");
-  try {
-    const data = await postJSON("/api/open-urls", { urls });
-    btn.textContent = `✓ Opened ${data.opened}`;
-    setTimeout(restore, 2000);
-  } catch (e) {
-    restore();
-    alert("Couldn't open the PRs: " + e.message);
-  }
-}
-
 // Right-aligned severity cluster on the title row: colored text tokens in a fixed
 // order, so counts line up and scan vertically down the list. Zero counts are omitted.
 function sevTokens(counts) {
@@ -1883,9 +1882,9 @@ function monitoredNotified(r) {
 // so the per-card status banners don't have to restate it.
 const TAB_INTROS = {
   maintained: "Repos you actively maintain — open update PRs and keep the default branch protected.",
-  pending: "Repos with an open update PR whose CI is still running, failing, or being fixed.",
-  passing: "Repos whose update PR has green CI but isn't approved yet — awaiting review.",
-  approved: "Repos whose update PR is approved — ready to merge.",
+  pending: "Update PRs whose CI is still running, failing, or being fixed (live fix logs on each card).",
+  passing: "Update PRs with green CI but no approval yet — awaiting review.",
+  approved: "Update PRs that are approved — ready to merge.",
   monitored: "Inactive-client repos you watch but don't patch — email the client, then mark them notified.",
   notified: "Monitored repos whose client has already been emailed about these vulnerabilities.",
   ignored: "Repos that are out of scope for this tool.",
@@ -1948,12 +1947,19 @@ function ciLabel(ci) {
 
 function prChips(r) {
   if (!r.openPRs || !r.openPRs.length) return "";
+  // On a PR-lifecycle tab, show only this repo's PRs in that state — the per-PR split. The
+  // same repo can appear in several tabs, each card scoped to its matching PRs. Off those
+  // tabs (shouldn't happen for a pending repo, but be safe), show all.
+  const prs = PR_TABS.has(STATE.tab)
+    ? r.openPRs.filter((pr) => prLifecycleState(pr, r) === STATE.tab)
+    : r.openPRs;
+  if (!prs.length) return "";
   const ci = ciInline(r); // repo-level — supplies the Fix CI button (+ the legacy fallback)
   // New servers attach per-PR status (pr.ci); older ones don't. Fall back to the repo-level
   // badge on the first chip so a browser-reload-before-server-restart doesn't lose all badges.
-  const havePerPr = r.openPRs.some((pr) => pr.ci && pr.ci.state);
+  const havePerPr = prs.some((pr) => pr.ci && pr.ci.state);
   let btnShown = false; // one fix job per repo → attach its button to the first failing PR
-  return r.openPRs
+  return prs
     .map((pr, i) => {
       const label = havePerPr ? ciLabel(pr.ci) : (i === 0 ? ci.text : "");
       const ciText = label ? ` <span class="pr-meta">·</span> ${label}` : "";
@@ -2501,8 +2507,11 @@ function nestedOrder(list) {
 function priorityClass(r) {
   if (r.archived) return "";
   if (hasAttention(r)) return " prio-attn";
-  if (r.openPRs && r.openPRs.some((p) => p.reviewDecision === "APPROVED")) return " prio-ready";
-  if (r.openPRs && r.openPRs.length) return " prio-pr";
+  // On a PR-lifecycle tab the card shows only that tab's PRs, so the edge accent should
+  // reflect THOSE (a Pending card mustn't go green just because a sibling PR is approved).
+  const prs = PR_TABS.has(STATE.tab) ? (r.openPRs || []).filter((p) => prLifecycleState(p, r) === STATE.tab) : (r.openPRs || []);
+  if (prs.some((p) => p.reviewDecision === "APPROVED")) return " prio-ready";
+  if (prs.length) return " prio-pr";
   return "";
 }
 function hasAttention(r) {
