@@ -306,7 +306,12 @@ auth.
    (github-actions, git-sha pins) are left alone. Dependabot then self-closes the
    superseded ones. Deduped to once per PR per day. Disable with
    `"nudgeDependabotOnClear": false`.
-5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`
+5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`. The branch is
+   date-stamped, so a same-day re-run refreshes the existing PR. Across days, if a prior
+   update PR is still open: when today's freshly-built tree is **identical** to it, nothing
+   is opened (it's left as-is); when it **differs**, the new PR is opened and the prior one is
+   **superseded** — closed with a "Superseded by #N" comment — so the repo never accumulates
+   duplicate update PRs. (Also gated by `"closeObsoletePRs": false`.)
 
 **Minimize major bumps.** Security fixes that exist **within the installed major**
 are applied automatically. An advisory whose only fix is in a **higher major**
@@ -438,6 +443,94 @@ auto-fills the greeting and recipient.
 (`notifications.json`), moving the repo to **Notified**. If a **new** advisory
 appears later, the card flips to *"N new advisories since you notified — re-notify
 recommended"* and the repo returns to **Monitored**.
+
+## Finishing open PRs — consolidate, rebase, review
+
+Once a repo has open tool PRs, a few actions help drive them to merge. They appear on the
+Pending / Passing / Approved tabs.
+
+### Consolidate colliding PRs — Rollup / Stack / Sequence
+
+When **≥2** of a repo's open tool PRs branched off the same base **and** change the same
+lockfile (`package-lock.json`, `Gemfile.lock`, …), they can't all merge cleanly — the second
+to merge invalidates the first's lockfile. The dashboard detects that cluster (server-side,
+authoritative) and offers three ways out on the card banner; you pick per repo:
+
+- **⬆ Roll up → 1 PR** — a high-effort headless session merges every branch onto a fresh
+  `release/deps-<date>` branch, regenerates the lockfile **once** so all upgrades coexist,
+  opens a single PR to review & squash-merge, and **closes the originals** in its favor.
+  Fewest PRs; review the whole batch together. (`lib/rollup.js`, `/api/rollup`.)
+- **🥞 Stack → N ordered PRs** — a session merges each PR onto the one below it (regenerating
+  the lockfile each time), pushes the rewritten branches, then **retargets each PR's base** to
+  the branch below so its diff shows only its own delta. Merge bottom-up; GitHub retargets
+  each to the base as its parent lands. Keeps every PR independently reviewable.
+- **⏱ Sequence → merge in order** — no code changes now: records a blocked-by ordering and
+  comments it on each PR. When a blocker merges, the dashboard **auto-rebases** the next PR
+  (merge base + regenerate the lockfile) on the next poll. Lightest touch; resolves the clash
+  lazily at merge time. (Stack/sequence live in `lib/consolidate.js`, `/api/consolidate`; the
+  ordering is persisted in `pr-links.json` and the auto-rebase runs in `pollSequenceLinks`.)
+
+Stacked / sequenced PRs carry a **🥞 stacked on #N** / **⏱ after #N** badge, and the banner
+stops offering to consolidate PRs that are already linked — so it's clear which way a clash
+was resolved and you can't double-apply it.
+
+### ⟳ Rebase / Update branch (per PR)
+
+A PR that's **behind** its base or **conflicting** shows a Rebase button. It launches a
+headless session that merges the base in, regenerates the lockfile, resolves conflicts, and
+pushes — CI then re-runs. (`createRebasePR` in `lib/rollup.js`, `/api/rebase`.)
+
+### 💬 Review console (Copilot + reviewer comments)
+
+A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
+console (`lib/reviews.js`). It lists every thread (Copilot 🤖 / human 👤 with file:line + diff
+context), auto-triages the **Copilot** ones with an advisory *fix / skip* suggestion, and lets
+you **skip** any. Hitting **Address** runs one headless session that, per comment, either makes
+the smallest reasonable fix **or rejects it** (when the comment is wrong / out of scope) —
+then pushes and **replies to + resolves each thread** with a tailored note (the fix's commit,
+or the reason it was rejected). Skipped comments stay open. Keyboard: `j`/`k` move, `x` skip,
+`a` address, `h`/`l` prev/next PR, `o` open, `esc` close.
+
+### 🗒 Session log
+
+Every headless session's output is archived per repo (`session-history.json`) and viewable
+after the fact from the card's **⋯ → 🗒 Session log** menu (newest first, each expandable).
+Retention is PR-aware: a session tied to a PR is kept **until that PR merges/closes**, then
+pruned on the next Refresh.
+
+## How the headless Claude sessions are seeded
+
+Several actions launch a **headless `claude -p` session** in a local clone to do work a
+script can't — fixing failing CI, unblocking constraint-capped patches, major upgrades,
+release rollups, rebasing a stale branch, and addressing PR review comments. Every one of
+these routes through `runClaude` in `lib/fixer.js`, which injects a **shared system prompt**
+(`SESSION_PREAMBLE`, via the CLI's `--append-system-prompt`) so each session has consistent
+context about where it's running and how to behave. The preamble tells the session:
+
+- It's running **fully autonomously** — a headless `claude -p` with no human in the loop
+  mid-run — **inside this Dependency Dashboard**, which triages Dependabot alerts across the
+  org and launched it to carry out one specific remediation.
+- It's in a **fresh local clone of one repo** on a branch the dashboard already checked out;
+  stay in that repo.
+- **Non-interactive**: never ask questions or wait for confirmation (nobody can answer) —
+  decide from the evidence and proceed.
+- A human **watches the output stream live** in the card/console log, so narrate briefly.
+- Use the repo's **pinned toolchain through mise** (`mise exec -- …`) so versions match CI;
+  regenerate lockfiles with the package manager rather than editing them by hand.
+- Keep the change **minimal and scoped**; never stage tracker/state files (`.beads/`,
+  `.DS_Store`, editor configs).
+- **Defer to the task prompt** for what to commit and whether to push / open a PR — unless it
+  says otherwise, the dashboard handles pushing, opening PRs, and replying to review threads.
+
+That last point is why the shared preamble carries **no task-specific git directives**: those
+differ per action (the CI-fix session pushes its own branch; rollup/rebase/review let the
+dashboard push) and live in each action's own prompt. Reasoning effort, model, and timeout
+are per-session knobs (`claudeFix` / `claudeUnblock` / `claudeMajor` / `claudeRollup` /
+`claudeReview` config blocks); the breaking-change sessions default to max effort.
+
+The one exception is the **Copilot comment triage** (the advisory "fix / skip" suggestions in
+the review console): that's a quick, read-only, no-clone one-shot, so it carries its own
+focused prompt rather than the code-editing preamble.
 
 ## Autonomous loops
 
