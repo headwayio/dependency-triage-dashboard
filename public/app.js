@@ -179,6 +179,16 @@ function prLifecycleState(pr, repo) {
   return ci === "passing" ? "passing" : "pending";
 }
 
+// A kickoff job (open one/more PRs for blocked/major work) is in flight for this repo.
+// Keeps the repo in its worklist tab so the orchestration log stays visible until the
+// run finishes — without this, a majors-only repo would drop out the instant its last
+// PR lands (needsKickoff → false), cutting the monitoring short mid-run.
+const KICKOFF_KINDS = new Set(["major", "unblock", "bump"]);
+function hasActiveKickoffJob(r) {
+  const j = JOBS.get(r.name);
+  return !!(j && KICKOFF_KINDS.has(j.kind) && j.status !== "done" && j.status !== "error");
+}
+
 // ---- partitioning (the single source of truth for tabs + counts) ------------
 function partition() {
   const repos = (STATE.model && STATE.model.repos) || [];
@@ -194,9 +204,30 @@ function partition() {
   // (prChips filters by STATE.tab) while keeping all the repo detail — flagged packages,
   // the live CI-fix log, blocked/major tables. hasPRIn = "this repo has a PR in <state>".
   const hasPRIn = (r, st) => (r.openPRs || []).some((pr) => prLifecycleState(pr, r) === st);
+  // Uninitiated maintenance: blocked advisories needing an unblock, or majors that still
+  // need a PR. This is NEW work to kick off — it belongs in the worklist (Maintained, or
+  // Triage if not yet classified), NOT in the PR-lifecycle tabs, even when the repo also
+  // has open PRs. So a kickoff repo surfaces in its classification tab regardless of
+  // `pending`; once every advisory has a PR (or is merged), needsKickoff() goes false and
+  // it drops back out, living only in the PR tabs for its in-flight PRs.
+  // Blocked counts as kickoff work only until an unblock PR is open — one
+  // `dependency-unblock/` PR covers every blocked advisory, so once it exists the work is
+  // launched (it just hasn't merged, so the advisories still sit below their floor). Mirrors
+  // the majors clause (majorsNeedingPR), which already subtracts majors that have a PR.
+  // A rollup supersedes ALL kickoff work: it consolidates the approved unblock/major PRs
+  // into one `release/deps-` PR and CLOSES the originals — so their branches vanish and the
+  // blocked/major detection would otherwise wrongly re-fire. While that release PR is open
+  // the consolidated work is in flight, so suppress kickoff (an actively-running job still
+  // pins, so its log stays visible). The advisories clear for real when the release merges.
+  const needsKickoff = (r) =>
+    hasActiveKickoffJob(r) ||
+    (!openToolPRs(r, "release/deps-").length && (
+      (r.blocked && r.blocked.length && !openToolPRs(r, "dependency-unblock/").length) ||
+      majorsNeedingPR(r, dedupeMajors((r.packages || []).filter((p) => p.majorRequired))).length > 0
+    ));
   return {
-    untriaged: active.filter((r) => !r.pending && cls(r) === "untriaged"),
-    maintained: active.filter((r) => !r.pending && cls(r) === "maintained" && !covered(r)),
+    untriaged: active.filter((r) => cls(r) === "untriaged" && (!r.pending || needsKickoff(r))),
+    maintained: active.filter((r) => cls(r) === "maintained" && !covered(r) && (!r.pending || needsKickoff(r))),
     pending: active.filter((r) => r.pending && hasPRIn(r, "pending")),
     passing: active.filter((r) => r.pending && hasPRIn(r, "passing")),
     approved: active.filter((r) => r.pending && hasPRIn(r, "approved")),
@@ -261,7 +292,11 @@ function renderSummary() {
   // more than one PR-lifecycle bucket (PRs in different states), so count unique pending
   // repos directly rather than summing the buckets (which would double-count).
   const prRepos = ((STATE.model && STATE.model.repos) || []).filter((r) => !r.archived && r.pending);
-  const t = summaryOf([...p.maintained, ...prRepos]);
+  // A kickoff repo can now be in BOTH Maintained and a PR bucket — dedupe by name so it
+  // counts once toward "to maintain".
+  const uniq = new Map();
+  for (const r of [...p.maintained, ...prRepos]) uniq.set(r.name, r);
+  const t = summaryOf([...uniq.values()]);
 
   $("#summary").innerHTML = `
     <div class="stat"><div class="n">${t.repos}</div><div class="l">to maintain</div></div>
@@ -869,6 +904,10 @@ function navAction(key) {
   if (key === "U") return kbUpgrade();
   if (key === "p") return kbProtect();
   if (key === "f") return kbFixCI();
+  if (key === "R") return kbRollup();
+  if (key === "c") return kbReviewComments();
+  if (key === "m") return kbReadyForReview();
+  if (key === "a") return kbRequestReview();
 }
 // Repos a bulk action targets: the selection if any, else the cursor row.
 function navTargetRepos(bulk) {
@@ -956,6 +995,38 @@ async function kbArchiveAlert() {
 function kbUpdate() { const r = cursorRepo(); if (r) onUpdate(r, compRowEl(r.name)); }
 function kbProtect() { const r = cursorRepo(); if (r) onProtectBranch(r, compRowEl(r.name)); }
 function kbFixCI() { const r = cursorRepo(); if (r) onFixCI(r); }
+function kbRollup() { const r = cursorRepo(); if (r) onRollup(r); }
+// A repo can have several PRs (each with its own Review button), so the shortcut opens the
+// review console for the FIRST PR with unresolved comments on the cursor repo — the common
+// case is a single such PR. For a specific other PR, click its 💬 Review button.
+function kbReviewComments() {
+  const r = cursorRepo();
+  if (!r) return;
+  const pr = (r.openPRs || []).find((p) => (p.reviewUnresolved || 0) > 0);
+  if (!pr) { toast("No unresolved review comments on this repo."); return; }
+  openReviewPanel(r, pr.number);
+}
+// Per-PR actions over the keyboard act on the FIRST eligible PR on the cursor repo (a card
+// can hold several). For a specific other PR, click its button. Find the real button so the
+// handler can disable it; fall back to a minimal stub carrying the data it reads.
+function kbReadyForReview() {
+  const r = cursorRepo();
+  if (!r) return;
+  const pr = (r.openPRs || []).find((p) => p.draft);
+  if (!pr) { toast("No draft PR on this repo to mark ready."); return; }
+  const btn = (cardEl(r.name) || document).querySelector(`.act-ready-pr[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number) } };
+  onReadyForReview(r, btn);
+}
+function kbRequestReview() {
+  const r = cursorRepo();
+  if (!r) return;
+  const sr = r.suggestedReviewer;
+  if (!sr) { toast("No suggested reviewer for this repo yet."); return; }
+  const pr = (r.openPRs || []).find((p) => !p.draft && p.reviewDecision !== "APPROVED" && !(p.reviewers || []).map(String).includes(sr.display));
+  if (!pr) { toast("No PR here is ready for a review request."); return; }
+  const btn = (cardEl(r.name) || document).querySelector(`.act-request-review[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number), reviewer: sr.handle } };
+  onRequestReview(r, btn);
+}
 function kbUpgrade() {
   const r = cursorRepo();
   if (!r) return;
@@ -1225,8 +1296,12 @@ function showShortcutHelp() {
       [k("p"), "protect the branch (maintained repos)"],
       [k("m") + " / " + k("w") + " / " + k("i"), "Track as Maintain / Monitor / Ignore"],
     ] : [
-      [k("u"), "open an update PR"],
+      [k("u"), "open an update PR / re-run"],
       [k("U"), "propose a runtime upgrade (EOL)"],
+      [k("R"), "roll up ready PRs into one release PR"],
+      [k("c"), "review comments (first PR with feedback)"],
+      [k("m"), "mark a draft PR ready for review"],
+      [k("a"), "assign / request review (first eligible PR)"],
       [k("p"), "protect the branch"],
       [k("f"), "fix failing CI"],
       [k("r"), "email the client"],
@@ -1258,7 +1333,7 @@ function toast(msg) {
 }
 // Per-tab action keys (movement/select/search/copy are shared; these differ by tab).
 function tabActionKeys() {
-  return STATE.tab === "compliance" ? "e#rpmwi" : "e#rupfU";
+  return STATE.tab === "compliance" ? "e#rpmwi" : "e#rupfURcma";
 }
 // Two-stage search Esc: the input's first Esc blurs + arms this window; a second Esc
 // shortly after clears the kept term. Placed before the compRows guard so it still works
@@ -1802,6 +1877,7 @@ function moreMenu(r, c, mode) {
     <div class="dd-menu" hidden>
       ${clsItems}
       ${emailItems}
+      <button class="menu-sessions">🗒 Session log</button>
       <button class="menu-archive danger">Archive repo</button>
     </div>
   </div>`;
@@ -1925,6 +2001,16 @@ function reviewBadge(pr) {
   }
   return "";
 }
+// A consolidation badge: this PR was stacked on / sequenced after another (recorded when the
+// user chose Stack or Sequence). Surfaces the ordering in the dashboard — otherwise it only
+// lives in the GitHub PR comments — and pairs with the cluster banner suppressing already-
+// linked PRs, so it's clear which way a clash was resolved.
+function linkBadge(pr) {
+  const l = pr.link;
+  if (!l || !l.blockedBy) return "";
+  if (l.strategy === "stack") return ` <span class="rev-state stacked" title="Stacked on #${l.blockedBy} — merge that first; this shows only its own delta">🥞 stacked on #${l.blockedBy}</span>`;
+  return ` <span class="rev-state sequenced" title="Sequenced after #${l.blockedBy} — auto-rebases when #${l.blockedBy} merges">⏱ after #${l.blockedBy}</span>`;
+}
 // One PR per row: link + review status + the CI check state, all consolidated onto a
 // single line (the CI used to be its own row). A failing PR's "Fix CI" button rides in
 // the right slot next to Copy.
@@ -1943,6 +2029,95 @@ function ciLabel(ci) {
   const cls = { passing: "ok", failing: "danger", pending: "warn", none: "muted" }[ci.state] || "muted";
   const t = fails ? ` title="${esc(ci.failing.join(", "))}"` : "";
   return `<span class="ci-inline ${cls}"${t}>${labels[ci.state]}</span>`;
+}
+
+// A PR is rollup-eligible when its CI isn't red (or still running) and it isn't a draft or
+// flagged changes-requested — i.e. work that's ready to ship. Passing CI qualifies, and so
+// does a PR with NO checks at all ("none") — only FAILING or in-flight checks disqualify.
+// Review isn't required: the rollup PR itself is review-gated before merge, so consolidating
+// unreviewed-but-ready work is safe and lets the whole stack be reviewed once, on the
+// combined PR. (`unknown`/unpolled state stays out — we only roll up a definite signal.)
+function rollupEligible(pr) {
+  if (!pr || pr.draft) return false;
+  if (pr.reviewDecision === "CHANGES_REQUESTED") return false;
+  const ci = pr.ci && pr.ci.state;
+  return ci === "passing" || ci === "none";
+}
+
+// A PR is a consolidation candidate when it's not a draft, not changes-requested, and isn't
+// itself a release rollup — CI state is irrelevant here (the collision is between branches,
+// not checks), which is why this fires on the Pending tab too, unlike rollupEligible.
+function consolidationCandidate(pr) {
+  if (!pr || pr.draft) return false;
+  if (pr.reviewDecision === "CHANGES_REQUESTED") return false;
+  if (pr.link && pr.link.blockedBy) return false; // already stacked/sequenced — don't re-offer
+  return !String(pr.headRefName || "").startsWith("release/deps-");
+}
+
+// The largest set of this repo's open PRs that WILL collide on merge: ≥2 candidates sharing
+// a base branch AND a lockfile basename (the surface that actually conflicts). Mirrors the
+// server's computeConsolidationCluster so the banner only appears when there's a real clash.
+// Returns { base, lock, prs:[…] } or null. Degrades to null on an older model that predates
+// baseRefName/lockfiles (no false positives).
+function consolidationCluster(r) {
+  const cands = (r.openPRs || []).filter(consolidationCandidate);
+  const buckets = new Map();
+  for (const pr of cands) {
+    const base = pr.baseRefName || r.defaultBranch || "main";
+    for (const lock of pr.lockfiles || []) {
+      const key = base + "\n" + lock;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(pr);
+    }
+  }
+  let best = null;
+  for (const [key, prs] of buckets) {
+    const uniq = [...new Map(prs.map((p) => [p.number, p])).values()];
+    if (uniq.length >= 2 && (!best || uniq.length > best.prs.length)) {
+      const [base, lock] = key.split("\n");
+      best = { base, lock, prs: uniq };
+    }
+  }
+  return best;
+}
+
+// When ≥2 of a repo's PRs branched off the same base and both change the same lockfile, they
+// can't all merge cleanly — the second invalidates the first's lockfile. Offer the three ways
+// out (the user picks per repo): roll up into ONE PR, STACK them so they merge in order, or
+// SEQUENCE them (independent PRs that auto-rebase as each blocker merges). Shown on every
+// PR-lifecycle tab. Falls back to the legacy rollup-only banner when the model lacks the
+// base/lockfile data needed to detect a precise cluster.
+function consolidationBanner(r) {
+  if (!PR_TABS.has(STATE.tab)) return "";
+  const cl = consolidationCluster(r);
+  if (cl) {
+    const n = cl.prs.length;
+    const nums = cl.prs.map((p) => `#${p.number}`).join(", ");
+    const base = esc(cl.base), lock = esc(cl.lock);
+    const rollupBtn = `<button class="primary act-rollup" title="ONE PR: a high-effort session merges all ${n} branches onto a new release/deps branch, regenerates ${lock} once, opens a single PR to review &amp; squash-merge, and closes the originals.">⬆ Roll up → 1 PR</button>`;
+    const stackBtn = `<button class="act-stack" title="${n} ORDERED PRs: a session merges each PR onto the one below it and regenerates ${lock}, then retargets each PR's base so it shows only its own change and merges cleanly bottom-up. Keeps every PR reviewable on its own.">🥞 Stack → ${n} ordered PRs</button>`;
+    const seqBtn = `<button class="act-sequence" title="${n} INDEPENDENT PRs: no code changes now — records a merge order and comments it on each PR. When a blocker merges, the dashboard auto-rebases the next one (merge base + regenerate ${lock}). Lightest touch; resolves the clash lazily at merge time.">⏱ Sequence → merge in order</button>`;
+    return srow(
+      "warn",
+      `🧬 ${n} PRs (${nums}) on <code>${base}</code> both change <code>${lock}</code> — they'll conflict on merge. Consolidate:`,
+      rollupBtn + " " + stackBtn + " " + seqBtn,
+      "",
+      "flow"
+    );
+  }
+  // Fallback: legacy rollup-only banner for an older model without base/lockfile data, on the
+  // shippable tabs where it always lived (≥2 ready PRs, no precise collision check available).
+  if (STATE.tab !== "approved" && STATE.tab !== "passing") return "";
+  const eligible = (r.openPRs || []).filter(rollupEligible);
+  if (eligible.length < 2) return "";
+  const btn = `<button class="primary act-rollup" title="Merge these ${eligible.length} PRs onto one release branch via a high-effort Claude session (conflicts + lockfiles resolved once), open a single release PR to review &amp; squash-merge, and close the originals in its favor">⬆ Roll up ${eligible.length} PRs into one release PR</button>`;
+  return srow(
+    "info",
+    `🧬 ${eligible.length} PRs without failing checks touch the same lockfiles — consolidate into one coherent release PR so conflicts &amp; lockfiles resolve once, then review &amp; squash-merge.`,
+    btn,
+    "",
+    "flow"
+  );
 }
 
 function prChips(r) {
@@ -1976,10 +2151,29 @@ function prChips(r) {
         ? `<button class="pr-act act-request-review" data-number="${pr.number}" data-reviewer="${esc(sr.handle)}" title="Request a review from @${esc(sr.display)} on this PR">👤 Request review from @${esc(sr.display)}</button>`
         : "";
       const readyBtn = pr.draft
-        ? `<button class="pr-act act-ready-pr" data-number="${pr.number}" title="Mark this draft PR as ready for review on GitHub">✓ Ready for review</button>`
+        ? `<button class="pr-act act-ready-pr" data-number="${pr.number}" title="Mark this draft PR as ready for review on GitHub">Mark ready for review</button>`
+        : "";
+      // Stale-branch action: a PR behind its base, or conflicting with it, needs the base
+      // merged in + lockfiles regenerated. A headless Claude session handles either (a plain
+      // update for BEHIND, full conflict resolution for DIRTY/CONFLICTING). Surfaces only
+      // when the merge-state poll says it's needed, so it's absent on clean/up-to-date PRs.
+      const conflicting = pr.mergeStateStatus === "DIRTY" || pr.mergeable === "CONFLICTING";
+      const behind = pr.mergeStateStatus === "BEHIND";
+      const rebaseBtn = (conflicting || behind)
+        ? `<button class="pr-act act-rebase" data-number="${pr.number}" title="${conflicting
+            ? "This branch conflicts with the base — launch a headless Claude session to merge the base in, regenerate lockfiles, and resolve the conflicts"
+            : "This branch is behind the base — merge the base in and regenerate lockfiles so it's mergeable again"}">⟳ ${conflicting ? "Rebase &amp; resolve" : "Update branch"}</button>`
+        : "";
+      // Unresolved review threads (Copilot + humans) → open the review console to triage,
+      // address, and resolve them. Count comes from the per-PR poll (pr.reviewUnresolved).
+      const rvN = pr.reviewUnresolved || 0;
+      const reviewCommentsBtn = rvN > 0
+        ? `<button class="pr-act act-review-comments" data-number="${pr.number}" title="${rvN} unresolved review comment${rvN === 1 ? "" : "s"} (Copilot + reviewers) — open the review console to triage, fix, reply &amp; resolve">💬 Review ${rvN}</button>`
         : "";
       const right =
         fixBtn +
+        rebaseBtn +
+        reviewCommentsBtn +
         reviewBtn +
         readyBtn +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
@@ -1989,7 +2183,7 @@ function prChips(r) {
         : "";
       return srow(
         "pr",
-        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${titleHtml}${reviewBadge(pr)}${ciText}`,
+        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${titleHtml}${reviewBadge(pr)}${linkBadge(pr)}${ciText}`,
         right
       );
     })
@@ -2036,7 +2230,7 @@ async function pollPRStatus(refresh) {
         if (!metas || !r.openPRs) continue;
         for (const pr of r.openPRs) {
           const m = metas.find((x) => x.number === pr.number);
-          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; pr.ci = m.ci; }
+          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
         }
       }
     }
@@ -2281,10 +2475,13 @@ function majorRequiredAdvisories(r) {
 // action button), then the in-flight PR rows (blue), then resting notes (green/muted).
 // The colored left tick per row replaces the old labeled zone boxes.
 function statusRows(r) {
+  // Blocked + major upgrades are uninitiated work, surfaced (and kicked off) in the
+  // worklist tabs — not on the PR-lifecycle tabs, where the card is about in-flight PRs.
+  const kickoff = PR_TABS.has(STATE.tab) ? "" : blockedAdvisories(r) + majorRequiredAdvisories(r);
   const rows =
-    eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + blockedAdvisories(r) + majorRequiredAdvisories(r) +
+    eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + kickoff +
     classifyPrompt(r) + monitoredStale(r) +
-    prChips(r) + dispoBumpNote(r) +
+    consolidationBanner(r) + prChips(r) + dispoBumpNote(r) +
     dispoCovered(r) + monitoredNotified(r);
   return rows ? `<div class="ar-status">${rows}</div>` : "";
 }
@@ -2494,6 +2691,462 @@ async function onUpgradeMajors(r) {
   }
 }
 
+// Consolidate the repo's approved PRs into one release PR. The server re-fetches the
+// approved open PRs (authoritative — it closes the originals), so the count here is just
+// for the confirm copy; the server has the final say.
+async function onRollup(r) {
+  const eligible = (r.openPRs || []).filter(rollupEligible);
+  const n = eligible.length;
+  if (n < 2) { alert("Need at least two open PRs without failing checks to roll up."); return; }
+  const listTxt = eligible.slice(0, 8).map((p) => `• #${p.number} ${(p.title || "").trim()}`.trim()).join("\n");
+  // Surface every OTHER open PR on this repo that the rollup will NOT touch (only non-draft,
+  // not-changes-requested PRs whose checks aren't failing/running are consolidated), with
+  // why — so it's obvious that e.g. 2 of 7 are being left behind.
+  const inSet = new Set(eligible.map((p) => p.number));
+  const excluded = (r.openPRs || []).filter((p) => !inSet.has(p.number));
+  const excludeReason = (pr) => {
+    if ((pr.headRefName || "").startsWith("release/deps-")) return "existing release rollup";
+    if (pr.draft) return "draft";
+    if (pr.reviewDecision === "CHANGES_REQUESTED") return "changes requested";
+    const ci = pr.ci && pr.ci.state;
+    if (ci === "failing") return "checks failing";
+    if (ci === "pending") return "checks running";
+    return "CI status unknown";
+  };
+  let warnTxt = "";
+  if (excluded.length) {
+    const exLines = excluded.slice(0, 10).map((p) => `• #${p.number} ${(p.title || "").trim()} — ${excludeReason(p)}`).join("\n");
+    warnTxt =
+      `\n\n⚠ ${excluded.length} other open PR${excluded.length === 1 ? "" : "s"} on ${r.nameWithOwner} ` +
+      `${excluded.length === 1 ? "is" : "are"} NOT in this rollup (failing/running checks, drafts, and changes-requested PRs are left out) and will stay open:\n` +
+      `${exLines}${excluded.length > 10 ? "\n…" : ""}\nGet them green (or out of draft) to include them.`;
+  }
+  if (
+    !(await confirmModal({
+      confirmLabel: `Roll up ${n} PRs`,
+      message:
+        `Consolidate ${n} PRs on ${r.nameWithOwner} into one release PR?\n\n${listTxt}${n > 8 ? "\n…" : ""}` +
+        warnTxt +
+        `\n\nA high-effort headless Claude session merges all ${n} branches onto a new release/deps branch, resolves conflicts, regenerates the lockfiles so every upgrade coexists, and runs the suite. The dashboard then opens ONE release PR (review &amp; squash-merge it) and CLOSES the originals in its favor. Runs in the background.`,
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting rollup of ${n} approved PR(s)…`, level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/rollup", { repo: r.name });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "rollup";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the rollup: " + e.message);
+  }
+}
+
+// Stack the conflicting cluster: keep N PRs but make them merge in order. The server
+// recomputes the cluster authoritatively, so the count here is just for the confirm copy.
+async function onStack(r) {
+  const cl = consolidationCluster(r);
+  if (!cl) { alert("No cluster of same-base PRs sharing a lockfile to stack."); return; }
+  const n = cl.prs.length;
+  const order = cl.prs
+    .slice()
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
+  const listTxt = order.map((p, i) => `${i + 1}. #${p.number} ${(p.title || "").trim()}`).join("\n");
+  if (
+    !(await confirmModal({
+      confirmLabel: `Stack ${n} PRs`,
+      message:
+        `Stack ${n} PRs on ${r.nameWithOwner} so they merge in order (bottom → top)?\n\n${listTxt}\n\n` +
+        `A high-effort headless Claude session merges each PR onto the one below it and regenerates ${cl.lock}, then the dashboard force-pushes the branches and retargets each PR's base to the branch below. Each PR stays separately reviewable and merges cleanly bottom-up. Runs in the background.`,
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting stack of ${n} PR(s)…`, level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/consolidate", { repo: r.name, strategy: "stack" });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "stack";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the stack: " + e.message);
+  }
+}
+
+// Sequence the conflicting cluster: leave N independent PRs but record a merge order and
+// comment it on each. No code changes now — the dashboard auto-rebases each PR once its
+// blocker merges. Fast (no session); resolves the lockfile clash lazily at merge time.
+async function onSequence(r) {
+  const cl = consolidationCluster(r);
+  if (!cl) { alert("No cluster of same-base PRs sharing a lockfile to sequence."); return; }
+  const n = cl.prs.length;
+  const order = cl.prs
+    .slice()
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
+  const listTxt = order.map((p, i) => `${i + 1}. #${p.number} ${(p.title || "").trim()}`).join("\n");
+  if (
+    !(await confirmModal({
+      confirmLabel: `Sequence ${n} PRs`,
+      message:
+        `Sequence ${n} PRs on ${r.nameWithOwner} to merge in this order?\n\n${listTxt}\n\n` +
+        `No branches change now — the dashboard records the order, comments it on each PR, and once a blocker merges it auto-rebases the next one (merge ${cl.base} + regenerate ${cl.lock}). Each PR reviews fully independently. Runs in the background.`,
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Sequencing ${n} PR(s)…`, level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/consolidate", { repo: r.name, strategy: "sequence" });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "sequence";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the sequence: " + e.message);
+  }
+}
+
+// Bring one stale/conflicting PR branch up to date: a headless Claude session merges the
+// base in, regenerates lockfiles, resolves conflicts, and pushes. CI then re-runs.
+async function onRebase(r, btn) {
+  const number = Number(btn.dataset.number);
+  if (
+    !(await confirmModal({
+      message:
+        `Update PR #${number} on ${r.nameWithOwner} against ${r.defaultBranch || "the base branch"}?\n\n` +
+        `A headless Claude session merges the base branch in, regenerates any lockfiles so the dependency changes stay coherent, resolves conflicts, and force-pushes the branch. CI then re-runs. Runs in the background.`,
+      confirmLabel: "Rebase PR",
+    }))
+  )
+    return;
+  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting rebase of PR #${number}…`, level: "info" }] });
+  reattachJobs();
+  try {
+    const data = await postJSON("/api/rebase", { repo: r.name, number });
+    const job = JOBS.get(r.name) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "rebase";
+    JOBS.set(r.name, job);
+  } catch (e) {
+    JOBS.delete(r.name);
+    scheduleRender();
+    alert("Couldn't start the rebase: " + e.message);
+  }
+}
+
+// ---- Session-log history viewer --------------------------------------------
+// Past headless sessions for a repo (newest first) in a read-only overlay — so a run's
+// output is reviewable after it finishes (the live job is pruned; the server keeps the log).
+const SESSION_KIND_LABEL = { fix: "CI fix", review: "Review comments", rollup: "Rollup", stack: "Stack PRs", sequence: "Sequence PRs", rebase: "Rebase", major: "Major upgrades", unblock: "Unblock", bump: "Constraint bump", update: "Update PR", upgrade: "Runtime upgrade" };
+
+async function openSessionHistory(r) {
+  let sessions = [];
+  try {
+    const data = await getJSON(`/api/session-history?repo=${encodeURIComponent(r.name)}`);
+    sessions = data.sessions || [];
+  } catch (e) { toast("Couldn't load session history: " + e.message); return; }
+  if (!sessions.length) { toast(`No session history yet for ${r.nameWithOwner || r.name}.`); return; }
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const close = () => { overlay.remove(); document.removeEventListener("keydown", onEsc, true); };
+  const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+  overlay.addEventListener("click", (e) => { if (e.target === overlay || e.target.closest("[data-close]")) close(); });
+  document.addEventListener("keydown", onEsc, true);
+
+  const items = sessions.map((s, i) => {
+    const when = s.endedAt ? relTime(new Date(s.endedAt).toISOString()) : "running";
+    const label = `${SESSION_KIND_LABEL[s.kind] || s.kind}${s.number ? ` · PR #${s.number}` : ""} · ${s.status === "error" ? "✗ error" : s.status} · ${when}`;
+    return `<details class="sess"${i === 0 ? " open" : ""}>
+      <summary>${esc(label)}</summary>
+      <div class="runlog show sess-log" data-sess="${i}"></div>
+    </details>`;
+  }).join("");
+  overlay.innerHTML =
+    `<div class="modal sessions-modal" role="dialog" aria-modal="true">` +
+    `<div class="rv-titlebar"><div class="modal-title">Session log — ${esc(r.nameWithOwner || r.name)}</div>` +
+    `<button class="subtle" data-close>✕</button></div>` +
+    `<div class="rv-subhead">${sessions.length} recent session${sessions.length === 1 ? "" : "s"} · newest first · kept in memory until server restart</div>` +
+    `<div class="sessions-list">${items}</div>` +
+    `<div class="modal-actions"><button class="primary" data-close>Close</button></div></div>`;
+  document.body.appendChild(overlay);
+  // Fill each session's log box from its archived event lines (handleEvent renders them).
+  sessions.forEach((s, i) => {
+    const box = overlay.querySelector(`.sess-log[data-sess="${i}"]`);
+    if (box) for (const ev of s.lines || []) handleEvent(ev, box);
+  });
+}
+
+// ---- Review console (per-PR overlay) ---------------------------------------
+// Triage + address a PR's review threads (Copilot + humans) without leaving the dashboard:
+// list them, auto-suggest fix/skip for the Copilot ones, let the user skip any, then run one
+// headless session that addresses the selected threads, pushes, and replies-to + resolves
+// each. State lives in REVIEW while the overlay is open; the overlay uses class
+// "modal-overlay" so the global keyboard shortcuts stand down while it's up.
+let REVIEW = null;
+
+function onOpenReviewPanel(r, btn) { openReviewPanel(r, Number(btn.dataset.number)); }
+
+async function openReviewPanel(r, number) {
+  const pr = (r.openPRs || []).find((p) => p.number === number);
+  REVIEW = { repo: r.name, nameWithOwner: r.nameWithOwner || r.name, number, prUrl: pr && pr.url, title: (pr && pr.title) || "", threads: null, verdicts: {}, skips: new Set(), cursor: 0, investigating: false, error: null };
+  renderReviewPanel();
+  try {
+    const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(r.name)}&number=${number}`);
+    if (!REVIEW || REVIEW.number !== number) return; // panel closed / switched while loading
+    REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+    REVIEW.cursor = 0;
+    renderReviewPanel();
+    // Auto-triage the Copilot threads (advisory only — the user still picks + clicks Address).
+    if (REVIEW.threads.some((t) => t.isCopilot)) {
+      REVIEW.investigating = true;
+      renderReviewPanel();
+      try {
+        const inv = await postJSON("/api/review-investigate", { repo: r.name, number });
+        if (REVIEW && REVIEW.number === number) REVIEW.verdicts = inv.verdicts || {};
+      } catch { /* advisory only — leave verdicts empty */ }
+      if (REVIEW && REVIEW.number === number) { REVIEW.investigating = false; renderReviewPanel(); }
+    }
+  } catch (e) {
+    if (REVIEW && REVIEW.number === number) { REVIEW.error = e.message; renderReviewPanel(); }
+  }
+}
+
+function closeReviewPanel() {
+  REVIEW = null;
+  const o = document.getElementById("review-overlay");
+  if (o) o.remove();
+}
+
+function reviewThreadHtml(t, i) {
+  const v = REVIEW;
+  const skipped = v.skips.has(t.id);
+  const cursor = i === v.cursor ? " cursor" : "";
+  const who = t.isCopilot ? "🤖 Copilot" : `👤 @${esc(t.author || "reviewer")}`;
+  const verdict = v.verdicts[t.id];
+  let badge = "";
+  if (t.isCopilot) {
+    if (v.investigating && !verdict) badge = `<span class="rv-verdict pending">investigating…</span>`;
+    else if (verdict) badge = `<span class="rv-verdict ${verdict.recommend === "skip" ? "skip" : "fix"}">${verdict.recommend === "skip" ? "⚠ likely skip" : "✅ worth fixing"}</span>`;
+  }
+  const reason = verdict && verdict.reason ? `<div class="rv-reason">${esc(verdict.reason)}</div>` : "";
+  const loc = `${esc(t.path || "")}${t.line ? ":" + t.line : ""}`;
+  return `<div class="rv-thread${skipped ? " skipped" : ""}${cursor}" data-tid="${esc(t.id)}">
+    <label class="rv-skip" title="Leave this comment out of the fix (it stays open)"><input type="checkbox" data-act="skip" data-id="${esc(t.id)}"${skipped ? " checked" : ""}> skip</label>
+    <div class="rv-main">
+      <div class="rv-head">${who} · <code>${loc}</code> ${badge} ${t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>` : ""}</div>
+      ${reason}
+      <div class="rv-body">${mdInline(t.body || "")}</div>
+      ${t.diffHunk ? `<pre class="rv-diff">${esc(t.diffHunk)}</pre>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderReviewPanel() {
+  if (!REVIEW) { const o = document.getElementById("review-overlay"); if (o) o.remove(); return; }
+  let overlay = document.getElementById("review-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "review-overlay";
+    overlay.className = "modal-overlay";
+    document.body.appendChild(overlay);
+    // Delegated handlers survive the innerHTML re-renders below (they're on the overlay).
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) return closeReviewPanel();
+      const a = e.target.closest("[data-act]");
+      if (!a) return;
+      if (a.dataset.act === "close") return closeReviewPanel();
+      if (a.dataset.act === "address") return addressReview();
+      if (a.dataset.act === "investigate") return reinvestigate();
+    });
+    overlay.addEventListener("change", (e) => {
+      const cb = e.target.closest('input[data-act="skip"]');
+      if (!cb || !REVIEW) return;
+      if (cb.checked) REVIEW.skips.add(cb.dataset.id); else REVIEW.skips.delete(cb.dataset.id);
+      const th = overlay.querySelector(`.rv-thread[data-tid="${cssEscape(cb.dataset.id)}"]`);
+      if (th) th.classList.toggle("skipped", cb.checked);
+      updateAddressBtn(); // targeted — avoid a full re-render that would disrupt the log
+    });
+  }
+  const v = REVIEW;
+  const copilotN = (v.threads || []).filter((t) => t.isCopilot).length;
+  const body = v.error
+    ? `<div class="rv-empty">Couldn't load review threads: ${esc(v.error)}</div>`
+    : v.threads == null
+      ? `<div class="rv-loading"><span class="spin"></span> Loading review threads…</div>`
+      : (!v.threads.length
+          ? `<div class="rv-empty">No unresolved review comments 🎉</div>`
+          : v.threads.map((t, i) => reviewThreadHtml(t, i)).join(""));
+  const hint = v.threads && v.threads.length
+    ? `<div class="rv-hint"><kbd>j</kbd>/<kbd>k</kbd> move · <kbd>x</kbd> skip · <kbd>a</kbd> address · <kbd>h</kbd>/<kbd>l</kbd> prev/next PR · <kbd>o</kbd> open · <kbd>esc</kbd> close</div>`
+    : "";
+  const titleTxt = `${esc(v.nameWithOwner)} · PR #${v.number}${v.title ? " — " + esc(v.title) : ""}`;
+  const investBtn = copilotN > 0
+    ? `<button class="subtle" data-act="investigate"${v.investigating ? " disabled" : ""}>${v.investigating ? "Investigating…" : "↻ Re-investigate Copilot"}</button>`
+    : "";
+  overlay.innerHTML =
+    `<div class="modal review-modal" role="dialog" aria-modal="true">` +
+    `<div class="rv-titlebar"><div class="modal-title">${titleTxt}</div>` +
+    `<div class="rv-titleacts">${v.prUrl ? `<a class="subtle" href="${esc(v.prUrl)}" target="_blank" rel="noopener">↗ GitHub</a>` : ""}<button class="subtle" data-act="close">✕</button></div></div>` +
+    `<div class="rv-subhead">${v.threads == null ? "" : `${v.threads.length} unresolved thread${v.threads.length === 1 ? "" : "s"}`}${copilotN ? ` · ${copilotN} from Copilot` : ""} ${investBtn}</div>` +
+    `<div class="rv-threads">${body}</div>` +
+    hint +
+    `<div class="modal-actions rv-actions">` +
+    // Once there are no unresolved threads (e.g. after a run resolved them all) there's
+    // nothing to address — replace the dead disabled Address button with a clear Done.
+    (Array.isArray(v.threads) && v.threads.length === 0
+      ? `<button class="primary" data-act="close">Done</button>`
+      : `<button class="subtle" data-act="close">Close</button><button class="primary" data-act="address" id="rv-address"></button>`) +
+    `</div></div>`;
+  updateAddressBtn();
+}
+
+function selectedThreadIds() {
+  if (!REVIEW || !REVIEW.threads) return [];
+  return REVIEW.threads.filter((t) => !REVIEW.skips.has(t.id)).map((t) => t.id);
+}
+
+function updateAddressBtn() {
+  const btn = document.getElementById("rv-address");
+  if (!btn || !REVIEW) return;
+  const n = selectedThreadIds().length;
+  btn.disabled = n === 0;
+  btn.textContent = `Address ${n} selected comment${n === 1 ? "" : "s"}`;
+}
+
+async function addressReview() {
+  if (!REVIEW) return;
+  const ids = selectedThreadIds();
+  if (!ids.length) return;
+  if (
+    !(await confirmModal({
+      confirmLabel: `Address ${ids.length}`,
+      message:
+        `Address ${ids.length} review comment${ids.length === 1 ? "" : "s"} on ${REVIEW.nameWithOwner} #${REVIEW.number}?\n\n` +
+        `A headless Claude session edits the PR branch to address each selected comment, pushes, then replies to and resolves each thread on GitHub. Skipped comments stay open. Runs in the background.`,
+    }))
+  )
+    return;
+  const repo = REVIEW.repo;
+  const number = REVIEW.number;
+  JOBS.set(repo, { status: "queued", kind: "review", events: [{ type: "log", line: `⏳ Addressing ${ids.length} review comment(s) on PR #${number}…`, level: "info" }] });
+  try {
+    const data = await postJSON("/api/review-address", { repo, number, threadIds: ids });
+    const job = JOBS.get(repo) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "review";
+    JOBS.set(repo, job);
+    // Submitting closes the console — the session now streams onto the repo's card (and is
+    // kept in session history afterward). reattachJobs wires the live log to the card.
+    closeReviewPanel();
+    reattachJobs();
+    toast(`Addressing ${ids.length} comment(s) on #${number} — streaming on the card.`);
+  } catch (e) {
+    JOBS.delete(repo);
+    alert("Couldn't start addressing the comments: " + e.message);
+  }
+}
+
+async function reinvestigate() {
+  if (!REVIEW || REVIEW.investigating || !REVIEW.threads) return;
+  REVIEW.investigating = true;
+  renderReviewPanel();
+  try {
+    const inv = await postJSON("/api/review-investigate", { repo: REVIEW.repo, number: REVIEW.number });
+    if (REVIEW) REVIEW.verdicts = inv.verdicts || {};
+  } catch { /* advisory */ }
+  if (REVIEW) { REVIEW.investigating = false; renderReviewPanel(); }
+}
+
+// Called from handleJobEvent when a review job finishes — refresh the panel's threads
+// (resolved ones drop) and the PR row's unresolved count.
+async function onReviewJobDone(repo) {
+  pollPRStatus(true);
+  if (!REVIEW || REVIEW.repo !== repo) return; // panel is normally closed on submit
+  try {
+    const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(repo)}&number=${REVIEW.number}`);
+    if (REVIEW && REVIEW.repo === repo) {
+      REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+      REVIEW.cursor = Math.min(REVIEW.cursor || 0, Math.max(0, REVIEW.threads.length - 1));
+      renderReviewPanel();
+    }
+  } catch { if (REVIEW) renderReviewPanel(); }
+}
+
+// Lightweight re-render of just the thread list (cursor move / skip toggle) — leaves the
+// streaming log untouched and keeps the focused thread in view.
+function renderThreads() {
+  const cont = document.querySelector("#review-overlay .rv-threads");
+  if (!cont || !REVIEW || !REVIEW.threads) return;
+  cont.innerHTML = REVIEW.threads.map((t, i) => reviewThreadHtml(t, i)).join("");
+  updateAddressBtn();
+  const cur = cont.querySelector(".rv-thread.cursor");
+  if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+function moveReviewCursor(d) {
+  const n = (REVIEW.threads || []).length;
+  if (!n) return;
+  REVIEW.cursor = Math.max(0, Math.min(n - 1, (REVIEW.cursor || 0) + d));
+  renderThreads();
+}
+
+function toggleCursorSkip() {
+  const t = (REVIEW.threads || [])[REVIEW.cursor];
+  if (!t) return;
+  if (REVIEW.skips.has(t.id)) REVIEW.skips.delete(t.id); else REVIEW.skips.add(t.id);
+  renderThreads();
+}
+
+// Every open PR (across the model) that has unresolved review comments, in display order —
+// the queue ]/[ steps through so you can churn your whole review backlog from the panel.
+function reviewPRCandidates() {
+  const out = [];
+  for (const r of (STATE.model && STATE.model.repos) || []) {
+    if (r.archived) continue;
+    for (const pr of r.openPRs || []) if ((pr.reviewUnresolved || 0) > 0) out.push({ r, number: pr.number });
+  }
+  return out;
+}
+
+function gotoReviewPR(d) {
+  if (!REVIEW) return;
+  const cands = reviewPRCandidates();
+  if (!cands.length) return;
+  let idx = cands.findIndex((c) => c.r.name === REVIEW.repo && c.number === REVIEW.number);
+  if (idx < 0) idx = 0;
+  const next = idx + d;
+  if (next < 0 || next >= cands.length) { toast(d > 0 ? "Last PR with review comments." : "First PR with review comments."); return; }
+  openReviewPanel(cands[next].r, cands[next].number);
+}
+
+// Keyboard control for the review console. Active only while the panel is open; the global
+// shortcuts already stand down (they bail on any .modal-overlay). Bails while a confirm
+// dialog sits on top so Esc/Enter there don't also drive the panel.
+function reviewKeydown(e) {
+  if (!REVIEW) return;
+  if (document.querySelector(".confirm-overlay")) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser/OS combos alone
+  const k = e.key;
+  if (k === "Escape") { e.preventDefault(); return closeReviewPanel(); }
+  if (k === "j" || k === "ArrowDown") { e.preventDefault(); return moveReviewCursor(1); }
+  if (k === "k" || k === "ArrowUp") { e.preventDefault(); return moveReviewCursor(-1); }
+  if (k === "l" || k === "L") { e.preventDefault(); return gotoReviewPR(1); }
+  if (k === "h" || k === "H") { e.preventDefault(); return gotoReviewPR(-1); }
+  if (k === "a") { e.preventDefault(); return addressReview(); }
+  if (!(REVIEW.threads || []).length) return;
+  if (k === "x" || k === " ") { e.preventDefault(); return toggleCursorSkip(); }
+  if (k === "o") {
+    e.preventDefault();
+    const t = REVIEW.threads[REVIEW.cursor];
+    if (t && t.url) window.open(t.url, "_blank", "noopener");
+  }
+}
+
 async function onFixCI(r) {
   if (!(await confirmModal({ message: `Launch a headless Claude session to fix the failing CI checks on ${r.nameWithOwner}?\n\nIt edits the PR branch in a local checkout and pushes — CI then re-runs.`, confirmLabel: "Fix CI" }))) return;
   try {
@@ -2663,6 +3316,9 @@ function card(r, nesting) {
   on(".act-bump", onBumpConstraints);
   on(".act-unblock", onUnblockDeps);
   on(".act-upgrade-majors", onUpgradeMajors);
+  on(".act-rollup", onRollup);
+  on(".act-stack", onStack);
+  on(".act-sequence", onSequence);
   el.querySelectorAll(".act-email").forEach((b) => b.addEventListener("click", () => onEmail(r, el)));
   el.querySelectorAll(".cls-btn, .cls-opt").forEach((b) =>
     b.addEventListener("click", () => onClassify(r, el, b.dataset.state))
@@ -2677,6 +3333,8 @@ function card(r, nesting) {
     const f = el.querySelector(".contact-form");
     if (f) { f.hidden = false; f.querySelector(".cname").focus(); }
   });
+  const ms = el.querySelector(".menu-sessions");
+  if (ms) ms.addEventListener("click", () => { closeAllMenus(); openSessionHistory(r); });
   const ma = el.querySelector(".menu-archive");
   if (ma) ma.addEventListener("click", () => { closeAllMenus(); onArchive(r, el); });
   const mea = el.querySelector(".menu-email-alt");
@@ -2687,6 +3345,10 @@ function card(r, nesting) {
   );
   el.querySelectorAll(".act-request-review").forEach((b) => b.addEventListener("click", () => onRequestReview(r, b)));
   el.querySelectorAll(".act-ready-pr").forEach((b) => b.addEventListener("click", () => onReadyForReview(r, b)));
+  // Per-PR buttons: bind EACH (a card can hold several PRs) and pass the button so the
+  // handler reads the right data-number — `on()` only binds the first match + passes the card.
+  el.querySelectorAll(".act-rebase").forEach((b) => b.addEventListener("click", () => onRebase(r, b)));
+  el.querySelectorAll(".act-review-comments").forEach((b) => b.addEventListener("click", () => onOpenReviewPanel(r, b)));
   const fix = el.querySelector(".ci-fix-btn");
   if (fix) fix.addEventListener("click", () => onFixCI(r));
   el.querySelectorAll(".eol-upgrade-btn").forEach((b) => b.addEventListener("click", () => onUpgradeRuntime(r, b.dataset.id)));
@@ -2797,11 +3459,26 @@ function pinBoxToBottom(box) {
   if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
 }
 
+// Render a SAFE inline-markdown subset for streamed log lines: escape first (so it's
+// XSS-safe — the only tags in the output are ones we inject), then convert `code`,
+// **bold**, and a leading #/##/### header. Deliberately NOT italic: `_` and `*` appear
+// constantly in package names and paths (administrate-field-boolean_to_yes_no) and would
+// be mangled. Per-line by design — the log streams a line at a time, so multi-line
+// constructs (fenced blocks, lists) aren't reassembled, but the inline noise is gone.
+function mdInline(text) {
+  let s = esc(text);
+  const h = s.match(/^(#{1,6})\s+(.*)$/);
+  if (h) s = h[2]; // strip the leading hashes; the whole line becomes a heading below
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+?)\*\*/g, "<strong>$1</strong>");
+  return h ? `<strong>${s}</strong>` : s;
+}
+
 function logLine(box, text, cls) {
   const follow = atBoxBottom(box); // decide BEFORE appending; the new line's height must not veto it
   const div = document.createElement("div");
   div.className = "line" + (cls ? " " + cls : "");
-  div.textContent = text;
+  div.innerHTML = mdInline(text); // inline markdown (escaped first); plain text falls through unchanged
   box.appendChild(div);
   if (follow) pinBoxToBottom(box); // already committed to following — pin unconditionally
 }
@@ -2943,7 +3620,7 @@ function cardEl(repo) {
 // Busy label for a card's CTA button while its background job is queued/running.
 function jobBusyHtml(status, kind) {
   if (status === "queued") return "⏳ Queued";
-  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…", unblock: "🔧 Unblocking…", major: "⬆ Upgrading majors…" }[kind] || "Working…";
+  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…", unblock: "🔧 Unblocking…", major: "⬆ Upgrading majors…", rollup: "🧬 Rolling up…", stack: "🥞 Stacking…", sequence: "⏱ Sequencing…", rebase: "⟳ Rebasing…" }[kind] || "Working…";
   return `<span class="spin"></span>${label}`;
 }
 
@@ -3037,7 +3714,9 @@ function finishJob(repo, evt) {
       if (r.openPRs.some((p) => p.url === url)) continue;
       const num = (url.match(/\/pull\/(\d+)/) || [])[1];
       const m = metaFor.get(url) || {};
-      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true, title: m.title || "", headRefName: m.branch || null });
+      // Stamp checks-running so the PR buckets straight into Pending PR (not transiently onto
+      // Passing via the repo-level CI fallback) and shows its indicator until the poll lands.
+      r.openPRs.push({ number: num ? Number(num) : "?", url, draft: true, title: m.title || "", headRefName: m.branch || null, ci: { state: "pending" } });
     }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (evt.prUrl && r) {
@@ -3048,7 +3727,7 @@ function finishJob(repo, evt) {
     // them until the next Refresh. Mirrors the server-side merge in runJob.
     r.openPRs = r.openPRs || [];
     if (!r.openPRs.some((p) => p.url === evt.prUrl)) {
-      r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "" });
+      r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "", ci: { state: "pending" } });
     }
     scheduleRender(); // graduates the repo into the Pending PR tab
   } else if (r && evt.disposition) {
@@ -3075,17 +3754,21 @@ function finishJob(repo, evt) {
 }
 
 // A major-upgrade fan-out opens one PR per major and streams a "pr" event as each
-// lands. Merge it into the model and re-render so it shows in the Pending/Passing PR
-// tab right away — without ending the still-running job (render→reattachJobs restores
-// the live runlog + busy buttons). Idempotent on url, so a reconnect replay is safe.
+// lands. Merge it into the model and re-render so it shows in the Pending PR tab right
+// away — without ending the still-running job (render→reattachJobs restores the live
+// runlog + busy buttons). Idempotent on url, so a reconnect replay is safe.
 function mergeStreamedPR(repo, evt) {
   const r = STATE.model && STATE.model.repos.find((x) => x.name === repo);
   if (!r || !evt.prUrl || (r.openPRs && r.openPRs.some((p) => p.url === evt.prUrl))) return;
   const num = (evt.prUrl.match(/\/pull\/(\d+)/) || [])[1];
   r.pending = true;
   r.openPRs = r.openPRs || [];
-  r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "" });
+  // Stamp checks-running so a brand-new PR buckets straight into Pending PR and shows its
+  // indicator — without it, the repo-level CI fallback can flash it onto Passing, then the
+  // first poll re-buckets it to Pending and it appears to "vanish" from the Passing tab.
+  r.openPRs.push({ number: num ? Number(num) : "?", url: evt.prUrl, draft: true, headRefName: evt.branch || null, title: evt.title || "", ci: { state: "pending" } });
   scheduleRender();
+  pollPRStatus(true); // refresh now so the real CI state lands promptly, not on the next 10s tick
 }
 
 // Route one event from the global stream to its repo's card + buffer.
@@ -3102,7 +3785,7 @@ function handleJobEvent(evt) {
   if (evt.type === "status") {
     job.status = evt.status;
     const card = cardEl(repo);
-    const btn = card && card.querySelector(".act-update, .act-bump, .act-unblock, .act-upgrade-majors");
+    const btn = card && card.querySelector(".act-update, .act-bump, .act-unblock, .act-upgrade-majors, .act-rollup, .act-stack, .act-sequence");
     if (btn && (evt.status === "queued" || evt.status === "running")) {
       btn.disabled = true;
       btn.innerHTML = jobBusyHtml(job.status, job.kind);
@@ -3115,9 +3798,14 @@ function handleJobEvent(evt) {
   const card = cardEl(repo);
   const box = card && card.querySelector(".runlog");
   if (box) { box.classList.add("show"); handleEvent(evt, box); }
-
   if (evt.type === "done") {
-    if (job.kind === "fix") { JOBS.delete(repo); pollPRStatus(true); } // CI re-runs; refresh badge, don't move
+    // Fix and rebase both edit an EXISTING PR branch (no new/closed PR) — just refresh the
+    // PR's CI + merge state; don't run finishJob's move-into-Pending logic.
+    if (job.kind === "fix" || job.kind === "rebase") { JOBS.delete(repo); pollPRStatus(true); }
+    else if (job.kind === "review") { JOBS.delete(repo); onReviewJobDone(repo); }
+    // Stack/sequence don't open or close PRs — they retarget bases / record an ordering. No
+    // finishJob move logic; just clear the job and refresh PR meta so the card reflects it.
+    else if (job.kind === "stack" || job.kind === "sequence") { JOBS.delete(repo); pollPRStatus(true); }
     else finishJob(repo, evt);
   } else if (evt.type === "pr") {
     mergeStreamedPR(repo, evt); // a fan-out PR opened mid-run — surface it now; job keeps running
@@ -3342,6 +4030,9 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", navKeydown);
 // Global: h / l move between tabs (works on every tab).
 document.addEventListener("keydown", tabNavKeydown);
+// Review console: j/k move comments, x skip, a address, h/l prev/next PR (capture so it
+// runs before the tab-nav handlers; it self-gates on REVIEW being open).
+document.addEventListener("keydown", reviewKeydown, true);
 
 async function loadEmailMode() {
   try {

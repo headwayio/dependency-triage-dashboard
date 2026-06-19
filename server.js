@@ -16,6 +16,9 @@ const ci = require("./lib/ci");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
 const { createUnblockPR, createMajorUpgradePRs, dedupeMajors, majorsNeedingPR } = require("./lib/upgrader");
+const { createRollupPR, createRebasePR } = require("./lib/rollup");
+const { createStackPRs, createSequencePlan } = require("./lib/consolidate");
+const reviews = require("./lib/reviews");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
 
@@ -383,6 +386,103 @@ function startMajorUpgradeJob(repoModel, packages) {
   return job;
 }
 
+/** Start a ROLLUP job: one high-effort headless session that merges a stack of approved
+ *  PRs onto a single release branch, regenerates the lockfiles, and tests — then the
+ *  dashboard opens ONE release PR and closes the originals in favor of it. */
+function startRollupJob(repoModel, prs) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `rollup-${++jobSeq}`,
+    kind: "rollup",
+    repo: repoModel.name,
+    model: repoModel,
+    prs: prs || [],
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "rollup" });
+  jobEmit(job, "log", { line: `⏳ Queued — consolidating ${(prs || []).length} approved PR(s) into one release PR (max effort)…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
+/** Start a REBASE job: a headless Claude session that merges the base into one open PR
+ *  branch, regenerates lockfiles, resolves conflicts, and pushes. Edits an existing PR. */
+function startRebaseJob(repoModel, number, branch) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `rebase-${++jobSeq}`,
+    kind: "rebase",
+    repo: repoModel.name,
+    model: repoModel,
+    number,
+    branch,
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "rebase" });
+  jobEmit(job, "log", { line: `⏳ Queued — rebasing PR #${number} onto its base…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
+/** Start a CONSOLIDATE job (strategy "stack" | "sequence"): resolve a set of conflicting
+ *  same-base dependency PRs into an ordered, non-colliding form. "stack" rewrites the
+ *  branches + retargets PR bases (headless session); "sequence" only records the ordering
+ *  and comments (fast, no session — the CI poller auto-rebases on blocker merge). */
+function startConsolidateJob(repoModel, strategy, cluster) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const prs = cluster.prs || [];
+  const job = {
+    id: `${strategy}-${++jobSeq}`,
+    kind: strategy, // "stack" | "sequence"
+    repo: repoModel.name,
+    model: repoModel,
+    prs,
+    base: cluster.base,
+    lock: cluster.lock,
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: strategy });
+  const verb = strategy === "stack" ? "stacking" : "sequencing";
+  jobEmit(job, "log", { line: `⏳ Queued — ${verb} ${prs.length} PR(s) that collide on ${cluster.lock || "the lockfile"}…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
+/** Start a REVIEW job: a headless Claude session that addresses the selected review
+ *  threads on one PR, pushes, then replies-to + resolves each. */
+function startReviewJob(repoModel, number, threadIds) {
+  const existing = findActiveJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `review-${++jobSeq}`,
+    kind: "review",
+    repo: repoModel.name,
+    model: repoModel,
+    number,
+    threadIds: threadIds || [],
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null, endedAt: null, log: [], result: null, error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "review" });
+  jobEmit(job, "log", { line: `⏳ Queued — addressing ${(threadIds || []).length} review comment(s) on PR #${number}…`, level: "warn" });
+  pumpQueue();
+  return job;
+}
+
 /** A blocked gem (a gemspec constraint caps a dep below its patch) auto-opens a
  *  constraint-bump PR when enabled — the actionable remediation chosen for blocked
  *  gems. Deduped by advisory signature so it never re-fires for the same set. */
@@ -427,7 +527,17 @@ function runJob(job) {
             ? await createUnblockPR({ config, repo: job.model, blocked: job.blocked, emit })
             : job.kind === "major"
               ? await createMajorUpgradePRs({ config, repo: job.model, packages: job.packages, emit })
-              : await createUpdatePR({ config, repo: job.model, emit, upgrade: job.upgrade });
+              : job.kind === "rollup"
+                ? await createRollupPR({ config, repo: job.model, prs: job.prs, emit })
+                : job.kind === "stack"
+                  ? await createStackPRs({ config, repo: job.model, prs: job.prs, base: job.base, lock: job.lock, emit })
+                  : job.kind === "sequence"
+                    ? await createSequencePlan({ config, repo: job.model, prs: job.prs, base: job.base, lock: job.lock, emit })
+                : job.kind === "rebase"
+                  ? await createRebasePR({ config, repo: job.model, number: job.number, branch: job.branch, emit })
+                  : job.kind === "review"
+                    ? await reviews.createAddressReviewPR({ config, repo: job.model, number: job.number, threadIds: job.threadIds, emit })
+                    : await createUpdatePR({ config, repo: job.model, emit, upgrade: job.upgrade });
       job.result = result;
       job.status = "done";
       // Reflect newly-opened PR(s) in the cached model immediately so a reload
@@ -479,10 +589,43 @@ function runJob(job) {
       job.endedAt = Date.now();
       runningCount--;
       jobEmit(job, "status", { status: job.status, kind: job.kind });
+      archiveJob(job);
       pruneJobs();
       pumpQueue();
     }
   })();
+}
+
+// Archive a finished headless session's log so the dashboard can show what a run did AFTER
+// it completes (the live job is pruned). Persisted to disk via state.js and retained until
+// the associated PR merges/closes (see state.pruneSessions + pruneSessionHistory below).
+function archiveJob(job) {
+  if (!job || !job.repo) return;
+  state.recordSession(job.repo, {
+    id: job.id,
+    kind: job.kind,
+    number: job.number || (job.pr && job.pr.number) || null,
+    prUrl: (job.result && (job.result.prUrl || (job.result.prs && job.result.prs[0] && job.result.prs[0].url))) || (job.pr && job.pr.url) || null,
+    status: job.status,
+    error: job.error || null,
+    startedAt: job.startedAt || null,
+    endedAt: job.endedAt || null,
+    // Keep only the renderable events the client log understands; cap so one chatty run
+    // can't balloon the store.
+    lines: (job.log || []).filter((e) => ["log", "step", "error", "done"].includes(e.type)).slice(-400),
+  });
+}
+
+// Drop session logs whose PR has merged/closed — derive the open-PR set per repo from the
+// current model and hand it to state.pruneSessions. Guard on a populated model so a cold
+// cache can't prune everything prematurely. Called after a full model rebuild.
+function pruneSessionHistory() {
+  if (!modelCache || !modelCache.repos) return;
+  const openByRepo = {};
+  for (const r of modelCache.repos) {
+    openByRepo[r.name] = new Set((r.openPRs || []).map((p) => p.number).filter((n) => n != null));
+  }
+  state.pruneSessions(openByRepo);
 }
 
 /** Keep only the 50 most recent finished jobs so memory stays bounded. */
@@ -570,6 +713,7 @@ function runFixJob(job) {
       job.endedAt = Date.now();
       fixRunning--;
       jobEmit(job, "status", { status: job.status, kind: "fix" });
+      archiveJob(job);
       pruneJobs();
       pumpFixQueue();
     }
@@ -579,6 +723,40 @@ function runFixJob(job) {
 async function prBranch(nwo, number) {
   const res = await run("gh", ["pr", "view", String(number), "--repo", nwo, "--json", "headRefName", "--jq", ".headRefName"]);
   return res.code === 0 ? res.stdout.trim() : null;
+}
+
+// Re-fetch a repo's open tool PRs fresh and find the largest cluster that WILL collide on
+// merge: ≥2 non-draft, not-changes-requested PRs sharing a base branch AND a lockfile
+// basename. Authoritative (re-queried, not from the cache) since we're about to rewrite
+// branches. Returns { base, lock, prs:[{number,url,title,headRefName,createdAt}] } or null.
+async function computeConsolidationCluster(nwo) {
+  const out = await run("gh", ["pr", "list", "--repo", nwo, "--state", "open",
+    "--json", "number,url,title,headRefName,baseRefName,createdAt,isDraft,reviewDecision,files"]);
+  let prs = [];
+  try { prs = JSON.parse(out.stdout.trim() || "[]"); } catch { prs = []; }
+  const cands = prs.filter((p) =>
+    p.headRefName && gh.isToolBranch(p.headRefName, config.branchPrefix) &&
+    !String(p.headRefName).startsWith("release/deps-") && // a release rollup isn't a consolidation input
+    !p.isDraft && p.reviewDecision !== "CHANGES_REQUESTED");
+  // Bucket by base + lockfile basename; the biggest bucket with ≥2 PRs is the cluster to fix.
+  const buckets = new Map();
+  for (const p of cands) {
+    const base = p.baseRefName || "main";
+    for (const lock of gh.prLockfiles(p.files)) {
+      const key = `${base} ${lock}`;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(p);
+    }
+  }
+  let best = null;
+  for (const [key, list] of buckets) {
+    const uniq = [...new Map(list.map((p) => [p.number, p])).values()];
+    if (uniq.length >= 2 && (!best || uniq.length > best.prs.length)) {
+      const [base, lock] = key.split(" ");
+      best = { base, lock, prs: uniq.map((p) => ({ number: p.number, url: p.url, title: p.title, headRefName: p.headRefName, createdAt: p.createdAt })) };
+    }
+  }
+  return best;
 }
 
 const STATE_RANK = { failing: 3, pending: 2, none: 1, unknown: 0, passing: 0 };
@@ -611,6 +789,9 @@ async function pollCI() {
     pr.draft = st.isDraft;
     pr.reviewDecision = st.reviewDecision;
     pr.reviewers = st.reviewers || [];
+    pr.mergeable = st.mergeable || null;
+    pr.mergeStateStatus = st.mergeStateStatus || null;
+    pr.reviewUnresolved = st.reviewUnresolved || 0;
     pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
     const w = worstByRepo.get(r.name);
     if (!w || (STATE_RANK[st.state] || 0) > (STATE_RANK[w.state] || 0)) worstByRepo.set(r.name, st);
@@ -672,6 +853,64 @@ function startEolPoller() {
   const ms = Math.max(1, Number(config.eolPollHours || 12)) * 3600 * 1000;
   const tick = () => pollEol().catch(() => {}).finally(() => { eolPollTimer = setTimeout(tick, ms); });
   eolPollTimer = setTimeout(tick, 8000); // first scan shortly after boot
+}
+
+// ---- Sequence auto-rebase ---------------------------------------------------
+// "Sequence" consolidation leaves each PR off the base and records a blocked-by ordering
+// in pr-links.json. This watches for a blocker that's no longer open: if it MERGED, the
+// dependent PR is auto-rebased (merge base + regenerate lockfile) and the link cleared;
+// otherwise (blocker closed-unmerged, or a stale stack link whose parent GitHub already
+// retargeted) the link is just dropped. Cheap: only repos with recorded links are touched,
+// and an open blocker is skipped via the cached model without any GitHub call.
+async function pollSequenceLinks() {
+  // Need a built model to know which dependent PRs are still open — without it we'd drop
+  // links (and lose the auto-rebase) for a blocker that merged while the model was cold
+  // (e.g. just after a restart, before any client loaded /api/repos). Skip until it's ready.
+  if (!modelCache) return;
+  const linksMap = state.prLinksMap();
+  for (const repoName of Object.keys(linksMap)) {
+    const r = modelCache && modelCache.repos.find((x) => x.name === repoName);
+    const nwo = `${config.org}/${repoName}`;
+    const openNums = new Set(((r && r.openPRs) || []).map((p) => p.number));
+    const links = linksMap[repoName];
+    for (const numStr of Object.keys(links)) {
+      const number = Number(numStr);
+      const link = links[numStr];
+      // The dependent PR itself is no longer open (it merged/closed) → the link is moot;
+      // drop it so it can't later trigger a doomed rebase on an already-merged PR. Gated on
+      // `r` so a repo missing from the model doesn't cause a false drop (openNums empty).
+      if (r && !openNums.has(number)) { state.clearPrLink(repoName, number); continue; }
+      const blocker = Number(link.blockedBy);
+      if (openNums.has(blocker)) continue; // blocker still open — keep waiting
+      // Not in the cached open set: ask GitHub whether it merged, closed, or is still open
+      // (the cache can lag). Only a definite non-open answer acts.
+      let st = "";
+      try {
+        const v = await run("gh", ["pr", "view", String(blocker), "--repo", nwo, "--json", "state", "--jq", ".state"]);
+        st = v.code === 0 ? v.stdout.trim() : "";
+      } catch { continue; } // transient — retry next cycle
+      if (st === "" || st === "OPEN") continue;
+      if (st === "MERGED" && link.strategy === "sequence" && r && openNums.has(number) && !findActiveJob(repoName)) {
+        const branch = await prBranch(nwo, number);
+        if (branch) {
+          startRebaseJob(r, number, branch);
+          state.clearPrLink(repoName, number);
+          console.log(`  Sequence: #${blocker} merged → auto-rebasing #${number} in ${repoName}.`);
+          continue;
+        }
+      }
+      // Merged-but-dependent-gone, closed-unmerged, or a stale stack link → drop it.
+      if (st === "MERGED" && link.strategy === "sequence" && r && openNums.has(number) && findActiveJob(repoName)) continue; // busy — retry
+      state.clearPrLink(repoName, number);
+    }
+  }
+}
+
+let seqPollTimer = null;
+function startSequencePoller() {
+  const ms = Math.max(20, Number(config.sequencePollSeconds || 60)) * 1000;
+  const tick = () => pollSequenceLinks().catch(() => {}).finally(() => { seqPollTimer = setTimeout(tick, ms); });
+  seqPollTimer = setTimeout(tick, 12000); // first check shortly after boot
 }
 
 let ciPollTimer = null;
@@ -788,6 +1027,7 @@ const server = http.createServer(async (req, res) => {
       if (!modelCache || u.searchParams.get("refresh") === "1") {
         modelCache = await gh.buildModel(config);
         pollEol().catch(() => {}); // scan EOL runtimes (+ auto-upgrade) once the model is ready
+        pruneSessionHistory(); // a rebuild reflects merged/closed PRs → drop their session logs
       }
       return sendJSON(res, 200, modelCache);
     }
@@ -853,7 +1093,8 @@ const server = http.createServer(async (req, res) => {
       if (modelCache) {
         for (const r of modelCache.repos) {
           if (r.pending && (r.openPRs || []).length) {
-            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], ci: p.ci || null }));
+            const links = state.prLinksFor(r.name); // { <prNumber>: { blockedBy, strategy } }
+            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], mergeable: p.mergeable || null, mergeStateStatus: p.mergeStateStatus || null, reviewUnresolved: p.reviewUnresolved || 0, ci: p.ci || null, baseRefName: p.baseRefName || null, lockfiles: p.lockfiles || [], link: links[p.number] || null }));
           }
         }
       }
@@ -1100,6 +1341,108 @@ const server = http.createServer(async (req, res) => {
       }
       const job = startMajorUpgradeJob(r, majors);
       return sendJSON(res, 200, { jobId: job.id, repo, majors: majors.length });
+    }
+
+    // Roll a stack of ready open PRs up into one release PR. We re-fetch the repo's open PRs
+    // from GitHub (authoritative — this closes PRs, so don't trust a possibly-stale cache),
+    // keep the non-draft / not-changes-requested ones with a head branch, then consolidate
+    // those whose CI isn't failing or in-flight — passing OR no-checks-at-all both qualify;
+    // only red/running checks disqualify. Review isn't required — the rollup PR is
+    // review-gated before merge — so unreviewed-but-ready work can be reviewed once together.
+    if (req.method === "POST" && route === "/api/rollup") {
+      const { repo } = await repoBody(req);
+      const r = await repoFromModel(repo);
+      const nwo = `${config.org}/${repo}`;
+      const out = await run("gh", ["pr", "list", "--repo", nwo, "--state", "open", "--json", "number,url,title,headRefName,reviewDecision,isDraft"]);
+      let openPrs = [];
+      try { openPrs = JSON.parse(out.stdout.trim() || "[]"); } catch { openPrs = []; }
+      const candidates = openPrs.filter((p) => p.headRefName && !p.isDraft && p.reviewDecision !== "CHANGES_REQUESTED");
+      const statuses = await ci.fetchPRStatusBatch(candidates.map((p) => ({ nwo, number: p.number })));
+      if (!statuses) return sendJSON(res, 502, { error: "Couldn't fetch PR CI status from GitHub — try again." });
+      const ready = candidates.filter((p) => {
+        const st = statuses.get(`${nwo}#${p.number}`);
+        return st && (st.state === "passing" || st.state === "none");
+      });
+      if (ready.length < 2) {
+        return sendJSON(res, 409, { error: `Need at least two open PRs without failing checks to roll up — found ${ready.length}.` });
+      }
+      const job = startRollupJob(r, ready.map((p) => ({ number: p.number, url: p.url, title: p.title, headRefName: p.headRefName })));
+      return sendJSON(res, 200, { jobId: job.id, repo, prs: ready.length });
+    }
+
+    // Consolidate a cluster of conflicting same-base PRs WITHOUT collapsing them into one:
+    // "stack" (retarget bases so they merge in order) or "sequence" (record ordering +
+    // auto-rebase each on its blocker's merge). The server recomputes the cluster fresh so
+    // the choice always acts on the current PRs. Rollup keeps its own /api/rollup endpoint.
+    if (req.method === "POST" && route === "/api/consolidate") {
+      const { repo, strategy } = await repoBody(req);
+      if (strategy !== "stack" && strategy !== "sequence") {
+        return sendJSON(res, 400, { error: "strategy must be 'stack' or 'sequence'." });
+      }
+      const r = await repoFromModel(repo);
+      const nwo = `${config.org}/${repo}`;
+      const cluster = await computeConsolidationCluster(nwo);
+      if (!cluster || cluster.prs.length < 2) {
+        return sendJSON(res, 409, { error: "Couldn't find 2+ open PRs sharing a base branch and lockfile to consolidate." });
+      }
+      const job = startConsolidateJob(r, strategy, cluster);
+      return sendJSON(res, 200, { jobId: job.id, repo, strategy, prs: cluster.prs.length, base: cluster.base, lock: cluster.lock });
+    }
+
+    // Rebase one open PR branch onto its base (merge base + regenerate lockfiles + resolve).
+    if (req.method === "POST" && route === "/api/rebase") {
+      const { repo, number } = await repoBody(req);
+      const num = Number(number);
+      if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
+      const r = await repoFromModel(repo);
+      const nwo = `${config.org}/${repo}`;
+      const branch = await prBranch(nwo, num);
+      if (!branch) return sendJSON(res, 404, { error: `Couldn't resolve the head branch for PR #${num}.` });
+      const job = startRebaseJob(r, num, branch);
+      return sendJSON(res, 200, { jobId: job.id, repo, number: num, branch });
+    }
+
+    // Past headless-session logs for one repo (newest first) — powers the card's
+    // "Session log" viewer so a run's output is reviewable after it finishes.
+    if (req.method === "GET" && route === "/api/session-history") {
+      const repo = u.searchParams.get("repo");
+      if (!repo) return sendJSON(res, 400, { error: "repo required." });
+      return sendJSON(res, 200, { repo, sessions: state.sessionHistoryFor(repo) });
+    }
+
+    // Review feedback for one PR — Copilot + human review threads (for the review panel).
+    if (req.method === "GET" && route === "/api/review-threads") {
+      const repo = u.searchParams.get("repo");
+      const num = Number(u.searchParams.get("number"));
+      if (!repo || !Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "repo and number required." });
+      gh.assertRepoName(repo);
+      const threads = await reviews.fetchReviewThreads(`${config.org}/${repo}`, num);
+      return sendJSON(res, 200, { repo, number: num, threads });
+    }
+
+    // Advisory triage of the Copilot threads (proceed/skip suggestions). Synchronous — a
+    // quick one-shot Claude pass; the panel shows a spinner while it runs.
+    if (req.method === "POST" && route === "/api/review-investigate") {
+      const { repo, number } = await repoBody(req);
+      const num = Number(number);
+      if (!repo || !Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "repo and number required." });
+      gh.assertRepoName(repo);
+      const nwo = `${config.org}/${repo}`;
+      const threads = await reviews.fetchReviewThreads(nwo, num);
+      const verdicts = await reviews.investigateThreads(nwo, threads);
+      return sendJSON(res, 200, { repo, number: num, verdicts });
+    }
+
+    // Address the selected review threads on a PR via a headless Claude session, then
+    // reply-to + resolve each. threadIds = the threads the user left selected (not skipped).
+    if (req.method === "POST" && route === "/api/review-address") {
+      const { repo, number, threadIds } = await repoBody(req);
+      const num = Number(number);
+      if (!repo || !Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "repo and number required." });
+      if (!Array.isArray(threadIds) || !threadIds.length) return sendJSON(res, 400, { error: "Select at least one comment to address." });
+      const r = await repoFromModel(repo);
+      const job = startReviewJob(r, num, threadIds);
+      return sendJSON(res, 200, { jobId: job.id, repo, number: num, threads: threadIds.length });
     }
 
     // Branch-protection status for every in-scope repo (cached; ?refresh=1 re-checks).
@@ -1493,4 +1836,5 @@ server.listen(PORT, HOST, () => {
   console.log(`  Gem constraint auto-bump: ${config.autoFixGemConstraints ? "ON" : "off"} (blocked gems → constraint-bump PR)\n`);
   startCIPoller();
   startEolPoller();
+  startSequencePoller();
 });
