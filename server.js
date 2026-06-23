@@ -404,7 +404,7 @@ function startRollupJob(repoModel, prs) {
   };
   jobs.set(job.id, job);
   jobEmit(job, "status", { status: "queued", kind: "rollup" });
-  jobEmit(job, "log", { line: `⏳ Queued — consolidating ${(prs || []).length} approved PR(s) into one release PR (max effort)…`, level: "warn" });
+  jobEmit(job, "log", { line: `⏳ Queued — consolidating ${(prs || []).length} PR(s) into one release PR (max effort)…`, level: "warn" });
   pumpQueue();
   return job;
 }
@@ -756,6 +756,9 @@ async function computeConsolidationCluster(nwo) {
       best = { base, lock, prs: uniq.map((p) => ({ number: p.number, url: p.url, title: p.title, headRefName: p.headRefName, createdAt: p.createdAt })) };
     }
   }
+  // Default merge order = FIFO (oldest first = bottom of stack / front of sequence), ties by
+  // number. The consolidate endpoint overrides this with the user's drag-chosen order.
+  if (best) best.prs.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
   return best;
 }
 
@@ -791,6 +794,7 @@ async function pollCI() {
     pr.reviewers = st.reviewers || [];
     pr.mergeable = st.mergeable || null;
     pr.mergeStateStatus = st.mergeStateStatus || null;
+    if (st.baseRefName) pr.baseRefName = st.baseRefName; // keep fresh so a retargeted base (stack) shows promptly
     pr.reviewUnresolved = st.reviewUnresolved || 0;
     pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
     const w = worstByRepo.get(r.name);
@@ -1350,24 +1354,32 @@ const server = http.createServer(async (req, res) => {
     // only red/running checks disqualify. Review isn't required — the rollup PR is
     // review-gated before merge — so unreviewed-but-ready work can be reviewed once together.
     if (req.method === "POST" && route === "/api/rollup") {
-      const { repo } = await repoBody(req);
+      const { repo, numbers } = await repoBody(req);
       const r = await repoFromModel(repo);
       const nwo = `${config.org}/${repo}`;
       const out = await run("gh", ["pr", "list", "--repo", nwo, "--state", "open", "--json", "number,url,title,headRefName,reviewDecision,isDraft"]);
       let openPrs = [];
       try { openPrs = JSON.parse(out.stdout.trim() || "[]"); } catch { openPrs = []; }
-      const candidates = openPrs.filter((p) => p.headRefName && !p.isDraft && p.reviewDecision !== "CHANGES_REQUESTED");
-      const statuses = await ci.fetchPRStatusBatch(candidates.map((p) => ({ nwo, number: p.number })));
-      if (!statuses) return sendJSON(res, 502, { error: "Couldn't fetch PR CI status from GitHub — try again." });
-      const ready = candidates.filter((p) => {
-        const st = statuses.get(`${nwo}#${p.number}`);
-        return st && (st.state === "passing" || st.state === "none");
-      });
-      if (ready.length < 2) {
-        return sendJSON(res, 409, { error: `Need at least two open PRs without failing checks to roll up — found ${ready.length}.` });
+      // Scope to the PR numbers the client offered (the consolidation cluster it showed) so we
+      // roll up exactly what the banner promised — not "every green PR on the repo". ALWAYS
+      // restrict to OUR tool branches: a human PR (or a non-tool branch) must never be swept
+      // into — and then CLOSED by — a rollup. When no numbers are sent (legacy/fallback), roll
+      // up all eligible tool PRs.
+      const orderIdx = Array.isArray(numbers) && numbers.length ? new Map(numbers.map((n, i) => [Number(n), i])) : null;
+      const targets = openPrs.filter((p) =>
+        p.headRefName &&
+        gh.isToolBranch(p.headRefName, config.branchPrefix) &&
+        !String(p.headRefName).startsWith("release/deps-") && // a release rollup isn't a rollup input
+        !p.isDraft && p.reviewDecision !== "CHANGES_REQUESTED" &&
+        (orderIdx ? orderIdx.has(p.number) : true));
+      if (targets.length < 2) {
+        return sendJSON(res, 409, { error: `Need at least two open tool PRs to roll up — found ${targets.length}.` });
       }
-      const job = startRollupJob(r, ready.map((p) => ({ number: p.number, url: p.url, title: p.title, headRefName: p.headRefName })));
-      return sendJSON(res, 200, { jobId: job.id, repo, prs: ready.length });
+      // Merge the branches in the order the user chose (first = merged first onto the release
+      // branch), so conflicts surface in that order. Falls back to gh's list order otherwise.
+      if (orderIdx) targets.sort((a, b) => orderIdx.get(a.number) - orderIdx.get(b.number));
+      const job = startRollupJob(r, targets.map((p) => ({ number: p.number, url: p.url, title: p.title, headRefName: p.headRefName })));
+      return sendJSON(res, 200, { jobId: job.id, repo, prs: targets.length });
     }
 
     // Consolidate a cluster of conflicting same-base PRs WITHOUT collapsing them into one:
@@ -1375,7 +1387,7 @@ const server = http.createServer(async (req, res) => {
     // auto-rebase each on its blocker's merge). The server recomputes the cluster fresh so
     // the choice always acts on the current PRs. Rollup keeps its own /api/rollup endpoint.
     if (req.method === "POST" && route === "/api/consolidate") {
-      const { repo, strategy } = await repoBody(req);
+      const { repo, strategy, order } = await repoBody(req);
       if (strategy !== "stack" && strategy !== "sequence") {
         return sendJSON(res, 400, { error: "strategy must be 'stack' or 'sequence'." });
       }
@@ -1384,6 +1396,14 @@ const server = http.createServer(async (req, res) => {
       const cluster = await computeConsolidationCluster(nwo);
       if (!cluster || cluster.prs.length < 2) {
         return sendJSON(res, 409, { error: "Couldn't find 2+ open PRs sharing a base branch and lockfile to consolidate." });
+      }
+      // Honor the user's chosen order (PR numbers, first = merged first) if it covers the
+      // cluster; otherwise the lib falls back to FIFO. Validate against the cluster so a stale
+      // client order can't smuggle in a PR that isn't part of it.
+      if (Array.isArray(order) && order.length) {
+        const inCluster = new Map(cluster.prs.map((p) => [p.number, p]));
+        const reordered = order.map(Number).map((n) => inCluster.get(n)).filter(Boolean);
+        if (reordered.length === cluster.prs.length) cluster.prs = reordered;
       }
       const job = startConsolidateJob(r, strategy, cluster);
       return sendJSON(res, 200, { jobId: job.id, repo, strategy, prs: cluster.prs.length, base: cluster.base, lock: cluster.lock });

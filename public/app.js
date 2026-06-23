@@ -2016,13 +2016,25 @@ function reviewBadge(pr) {
   }
   return "";
 }
-// A consolidation badge: this PR was stacked on / sequenced after another (recorded when the
-// user chose Stack or Sequence). Surfaces the ordering in the dashboard — otherwise it only
-// lives in the GitHub PR comments — and pairs with the cluster banner suppressing already-
-// linked PRs, so it's clear which way a clash was resolved.
-function linkBadge(pr) {
+// The PR (number) this one is stacked on, derived from the LIVE base chain: its base branch
+// is another open PR's head branch. Ground truth from GitHub — catches any stack (ours, or a
+// human's) and survives pr-links.json drift, since the retargeted base is the real signal.
+function stackParentNumber(pr, r) {
+  const base = pr.baseRefName;
+  if (!base) return null;
+  const parent = (r.openPRs || []).find((p) => p.number !== pr.number && p.headRefName === base);
+  return parent ? parent.number : null;
+}
+// A consolidation badge: this PR is stacked on / sequenced after another. Stacking is read
+// from the live base chain (authoritative); sequence ordering (which doesn't change the base)
+// from the recorded pr-links. Surfaces the relationship in the dashboard — otherwise it only
+// lives in the GitHub PR comments.
+function linkBadge(pr, r) {
+  const parent = stackParentNumber(pr, r);
+  if (parent) return ` <span class="rev-state stacked" title="Stacked on #${parent} — its base is that PR's branch, so this shows only its own delta; merge #${parent} first">🥞 stacked on #${parent}</span>`;
   const l = pr.link;
   if (!l || !l.blockedBy) return "";
+  // Fallback: a stack whose base retarget didn't land, or a recorded sequence ordering.
   if (l.strategy === "stack") return ` <span class="rev-state stacked" title="Stacked on #${l.blockedBy} — merge that first; this shows only its own delta">🥞 stacked on #${l.blockedBy}</span>`;
   return ` <span class="rev-state sequenced" title="Sequenced after #${l.blockedBy} — auto-rebases when #${l.blockedBy} merges">⏱ after #${l.blockedBy}</span>`;
 }
@@ -2109,9 +2121,20 @@ function consolidationBanner(r) {
     const n = cl.prs.length;
     const nums = cl.prs.map((p) => `#${p.number}`).join(", ");
     const base = esc(cl.base), lock = esc(cl.lock);
-    const rollupBtn = `<button class="primary act-rollup" title="ONE PR: a high-effort session merges all ${n} branches onto a new release/deps branch, regenerates ${lock} once, opens a single PR to review &amp; squash-merge, and closes the originals.">⬆ Roll up → 1 PR</button>`;
-    const stackBtn = `<button class="act-stack" title="${n} ORDERED PRs: a session merges each PR onto the one below it and regenerates ${lock}, then retargets each PR's base so it shows only its own change and merges cleanly bottom-up. Keeps every PR reviewable on its own.">🥞 Stack → ${n} ordered PRs</button>`;
-    const seqBtn = `<button class="act-sequence" title="${n} INDEPENDENT PRs: no code changes now — records a merge order and comments it on each PR. When a blocker merges, the dashboard auto-rebases the next one (merge base + regenerate ${lock}). Lightest touch; resolves the clash lazily at merge time.">⏱ Sequence → merge in order</button>`;
+    // Always recommend Roll up for a cluster. A cluster is, by definition, PRs that collide on
+    // the lockfile, so they WILL conflict on merge — which means sequencing or stacking still
+    // rebases (and, on a protected repo, dismisses the approval of) every PR after the first.
+    // So "they're approved → sequence to keep approvals" doesn't hold: only the front PR's
+    // approval survives. Rolling up resolves the conflict once and needs a single review.
+    // Sequence/Stack stay available for when you deliberately want N PRs (e.g. you expect them
+    // NOT to actually conflict, or you want to merge incrementally), but aren't auto-recommended.
+    const rec = "rollup";
+    const recWhy = "recommended: these PRs collide on the lockfile, so they conflict on merge — sequencing or stacking would rebase (and dismiss approvals on) every PR after the first, while rolling up resolves it once and needs a single review";
+    const tag = (k) => (rec === k ? ` <span class="rec-chip" title="${recWhy}">recommended</span>` : "");
+    const cls = (k) => (rec === k ? "primary " : "");
+    const rollupBtn = `<button class="${cls("rollup")}act-rollup" title="ONE PR: a high-effort session merges ALL ready dependency PRs on this base (every lockfile, not just ${lock}) onto a new release/deps branch, regenerates the lockfiles once, opens a single PR to review &amp; squash-merge, and closes the originals. You set the order next.">⬆ Roll up → 1 PR${tag("rollup")}</button>`;
+    const stackBtn = `<button class="${cls("stack")}act-stack" title="${n} ORDERED PRs: a session merges each PR onto the one below it and regenerates ${lock}, then retargets each PR's base so it shows only its own change and merges cleanly bottom-up. Keeps every PR reviewable on its own.">🥞 Stack → ${n} ordered PRs${tag("stack")}</button>`;
+    const seqBtn = `<button class="${cls("sequence")}act-sequence" title="${n} INDEPENDENT PRs: no code changes now — records a merge order and comments it on each PR. When a blocker merges, the dashboard auto-rebases the next one (merge base + regenerate ${lock}). Lightest touch; resolves the clash lazily at merge time.">⏱ Sequence → merge in order${tag("sequence")}</button>`;
     return srow(
       "warn",
       `🧬 ${n} PRs (${nums}) on <code>${base}</code> both change <code>${lock}</code> — they'll conflict on merge. Consolidate:`,
@@ -2139,10 +2162,12 @@ function prChips(r) {
   if (!r.openPRs || !r.openPRs.length) return "";
   // On a PR-lifecycle tab, show only this repo's PRs in that state — the per-PR split. The
   // same repo can appear in several tabs, each card scoped to its matching PRs. Off those
-  // tabs (shouldn't happen for a pending repo, but be safe), show all.
-  const prs = PR_TABS.has(STATE.tab)
+  // tabs (shouldn't happen for a pending repo, but be safe), show all. Ascending by number
+  // (oldest first) so the list reads in the same direction as the FIFO merge order.
+  const prs = (PR_TABS.has(STATE.tab)
     ? r.openPRs.filter((pr) => prLifecycleState(pr, r) === STATE.tab)
-    : r.openPRs;
+    : r.openPRs.slice()
+  ).slice().sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
   if (!prs.length) return "";
   const ci = ciInline(r); // repo-level — supplies the Fix CI button (+ the legacy fallback)
   // New servers attach per-PR status (pr.ci); older ones don't. Fall back to the repo-level
@@ -2198,7 +2223,7 @@ function prChips(r) {
         : "";
       return srow(
         "pr",
-        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${titleHtml}${reviewBadge(pr)}${linkBadge(pr)}${ciText}`,
+        `🔗 <a href="${esc(pr.url)}" target="_blank" rel="noopener">PR #${pr.number}${pr.draft ? " · draft" : ""} →</a>${titleHtml}${reviewBadge(pr)}${linkBadge(pr, r)}${ciText}`,
         right
       );
     })
@@ -2709,123 +2734,180 @@ async function onUpgradeMajors(r) {
 // Consolidate the repo's approved PRs into one release PR. The server re-fetches the
 // approved open PRs (authoritative — it closes the originals), so the count here is just
 // for the confirm copy; the server has the final say.
-async function onRollup(r) {
-  const eligible = (r.openPRs || []).filter(rollupEligible);
-  const n = eligible.length;
-  if (n < 2) { alert("Need at least two open PRs without failing checks to roll up."); return; }
-  const listTxt = eligible.slice(0, 8).map((p) => `• #${p.number} ${(p.title || "").trim()}`.trim()).join("\n");
-  // Surface every OTHER open PR on this repo that the rollup will NOT touch (only non-draft,
-  // not-changes-requested PRs whose checks aren't failing/running are consolidated), with
-  // why — so it's obvious that e.g. 2 of 7 are being left behind.
-  const inSet = new Set(eligible.map((p) => p.number));
-  const excluded = (r.openPRs || []).filter((p) => !inSet.has(p.number));
-  const excludeReason = (pr) => {
-    if ((pr.headRefName || "").startsWith("release/deps-")) return "existing release rollup";
-    if (pr.draft) return "draft";
-    if (pr.reviewDecision === "CHANGES_REQUESTED") return "changes requested";
-    const ci = pr.ci && pr.ci.state;
-    if (ci === "failing") return "checks failing";
-    if (ci === "pending") return "checks running";
-    return "CI status unknown";
-  };
-  let warnTxt = "";
-  if (excluded.length) {
-    const exLines = excluded.slice(0, 10).map((p) => `• #${p.number} ${(p.title || "").trim()} — ${excludeReason(p)}`).join("\n");
-    warnTxt =
-      `\n\n⚠ ${excluded.length} other open PR${excluded.length === 1 ? "" : "s"} on ${r.nameWithOwner} ` +
-      `${excluded.length === 1 ? "is" : "are"} NOT in this rollup (failing/running checks, drafts, and changes-requested PRs are left out) and will stay open:\n` +
-      `${exLines}${excluded.length > 10 ? "\n…" : ""}\nGet them green (or out of draft) to include them.`;
-  }
-  if (
-    !(await confirmModal({
-      confirmLabel: `Roll up ${n} PRs`,
-      message:
-        `Consolidate ${n} PRs on ${r.nameWithOwner} into one release PR?\n\n${listTxt}${n > 8 ? "\n…" : ""}` +
-        warnTxt +
-        `\n\nA high-effort headless Claude session merges all ${n} branches onto a new release/deps branch, resolves conflicts, regenerates the lockfiles so every upgrade coexists, and runs the suite. The dashboard then opens ONE release PR (review &amp; squash-merge it) and CLOSES the originals in its favor. Runs in the background.`,
-    }))
-  )
-    return;
-  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting rollup of ${n} approved PR(s)…`, level: "info" }] });
-  reattachJobs();
-  try {
-    const data = await postJSON("/api/rollup", { repo: r.name });
-    const job = JOBS.get(r.name) || { events: [] };
-    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "rollup";
-    JOBS.set(r.name, job);
-  } catch (e) {
-    JOBS.delete(r.name);
-    scheduleRender();
-    alert("Couldn't start the rollup: " + e.message);
-  }
-}
+// Roll up goes through the same ordering modal as stack/sequence — the merge order affects
+// which conflicts surface as the branches land on the release branch — then posts the chosen
+// order to /api/rollup (which scopes to these tool PRs and closes them in the release PR's favor).
+function onRollup(r) { openConsolidateOrder(r, "rollup"); }
 
 // Stack the conflicting cluster: keep N PRs but make them merge in order. The server
 // recomputes the cluster authoritatively, so the count here is just for the confirm copy.
-async function onStack(r) {
+function onStack(r) { openConsolidateOrder(r, "stack"); }
+function onSequence(r) { openConsolidateOrder(r, "sequence"); }
+
+// FIFO default order for a cluster: oldest PR first (bottom of stack / front of sequence),
+// ties by number. Reliable for tool-opened PRs (createdAt ≈ number), but the user can
+// override it by dragging in the ordering modal below.
+function fifoOrder(prs) {
+  return (prs || []).slice().sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
+}
+
+// Stack/Sequence ordering modal: show the cluster PRs in FIFO order, let the user drag to
+// reorder (first = merged first / bottom of stack), then run with the chosen order. State in
+// ORD while open.
+let ORD = null;
+function openConsolidateOrder(r, strategy) {
   const cl = consolidationCluster(r);
-  if (!cl) { alert("No cluster of same-base PRs sharing a lockfile to stack."); return; }
-  const n = cl.prs.length;
-  const order = cl.prs
-    .slice()
-    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
-  const listTxt = order.map((p, i) => `${i + 1}. #${p.number} ${(p.title || "").trim()}`).join("\n");
-  if (
-    !(await confirmModal({
-      confirmLabel: `Stack ${n} PRs`,
-      message:
-        `Stack ${n} PRs on ${r.nameWithOwner} so they merge in order (bottom → top)?\n\n${listTxt}\n\n` +
-        `A high-effort headless Claude session merges each PR onto the one below it and regenerates ${cl.lock}, then the dashboard force-pushes the branches and retargets each PR's base to the branch below. Each PR stays separately reviewable and merges cleanly bottom-up. Runs in the background.`,
-    }))
-  )
-    return;
-  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Starting stack of ${n} PR(s)…`, level: "info" }] });
-  reattachJobs();
+  let src, base, lock;
+  if (strategy === "rollup") {
+    // Rollup bundles ALL ready tool PRs targeting the base into ONE release PR — not just the
+    // largest lockfile cluster — because the release regenerates EVERY lockfile, so PRs don't
+    // need to share one to be combined (and leaving a same-base PR out just defers its conflict
+    // to after the release merges). Stack/Sequence stay scoped to the conflict cluster below.
+    base = cl ? cl.base : (r.defaultBranch || "main");
+    src = fifoOrder((r.openPRs || []).filter((p) =>
+      rollupEligible(p) &&
+      (p.baseRefName || r.defaultBranch) === base &&
+      !String(p.headRefName || "").startsWith("release/deps-")));
+    const locks = [...new Set(src.flatMap((p) => p.lockfiles || []))];
+    lock = locks.join(", ") || "the lockfile(s)";
+  } else if (cl) {
+    src = fifoOrder(cl.prs); base = cl.base; lock = cl.lock;
+  } else { alert(`No cluster of same-base PRs sharing a lockfile to ${strategy}.`); return; }
+  if (src.length < 2) { alert(`Need at least two PRs to ${strategy === "rollup" ? "roll up" : strategy}.`); return; }
+  ORD = {
+    repo: r.name,
+    nameWithOwner: r.nameWithOwner || r.name,
+    strategy,
+    base,
+    lock,
+    prs: src.map((p) => ({ number: p.number, title: (p.title || "").trim() })),
+    starting: false,
+  };
+  renderConsolidateOrder();
+}
+
+function closeConsolidateOrder() {
+  ORD = null;
+  const o = document.getElementById("ord-overlay");
+  if (o) o.remove();
+}
+
+function renderConsolidateOrder() {
+  if (!ORD) { const o = document.getElementById("ord-overlay"); if (o) o.remove(); return; }
+  let overlay = document.getElementById("ord-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "ord-overlay";
+    overlay.className = "modal-overlay";
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) return closeConsolidateOrder();
+      const a = e.target.closest("[data-act]");
+      if (!a) return;
+      if (a.dataset.act === "cancel") return closeConsolidateOrder();
+      if (a.dataset.act === "run") return runConsolidateOrder();
+    });
+  }
+  const v = ORD;
+  const verb = v.strategy === "rollup" ? "Roll up" : v.strategy === "stack" ? "Stack" : "Sequence";
+  const rows = v.prs.map((p, i) =>
+    `<li class="ord-row" draggable="true" data-num="${p.number}">` +
+    `<span class="ord-grip" title="Drag to reorder">⠿</span>` +
+    `<span class="ord-pos">${i + 1}</span>` +
+    `<span class="ord-pr">#${p.number}</span>` +
+    `<span class="ord-title">${esc(p.title)}</span></li>`
+  ).join("");
+  const intro = v.strategy === "rollup"
+    ? `Drag to set the order the branches are merged onto the release branch — <strong>top merges first</strong>, so conflicts surface in this order. All ${v.prs.length} collapse into ONE PR; the session resolves and regenerates the lockfile.`
+    : v.strategy === "stack"
+      ? `Drag to set the stack order — <strong>top of the list = bottom of the stack</strong> (merged first). Each PR is merged onto the one above it and its base retargeted accordingly.`
+      : `Drag to set the merge order — <strong>top of the list merges first</strong>. Each PR auto-rebases once the one above it merges.`;
+  const runLabel = v.strategy === "rollup" ? "Roll up → 1 PR" : `${verb} in this order`;
+  // No .modal-body wrapper — it carries its own 18/20 padding, which doubled up with the
+  // modal's. Content sits directly in the modal; the list itself scrolls when it's long.
+  overlay.innerHTML =
+    `<div class="modal ord-modal" role="dialog" aria-modal="true">` +
+    `<div class="modal-title">${verb} ${v.prs.length} PRs — order on ${esc(v.nameWithOwner)}</div>` +
+    `<p class="ord-intro">${intro}</p>` +
+    `<p class="ord-meta">base <code>${esc(v.base)}</code> · <code>${esc(v.lock)}</code></p>` +
+    `<ol class="ord-list">${rows}</ol>` +
+    `<div class="modal-actions">` +
+    `<button class="subtle" data-act="cancel">Cancel</button>` +
+    `<button class="primary" data-act="run"${v.starting ? " disabled" : ""}>${v.starting ? "Starting…" : runLabel}</button>` +
+    `</div></div>`;
+  wireOrderDnD(overlay.querySelector(".ord-list"));
+}
+
+// Vanilla drag-and-drop reordering for the .ord-list. Reorders the DOM live, then syncs
+// ORD.prs from the DOM on drop so the chosen order is what we submit.
+function wireOrderDnD(list) {
+  if (!list) return;
+  let dragging = null;
+  const afterElement = (y) => {
+    const rows = [...list.querySelectorAll(".ord-row:not(.dragging)")];
+    return rows.reduce((closest, el) => {
+      const box = el.getBoundingClientRect();
+      const offset = y - box.top - box.height / 2;
+      return offset < 0 && offset > closest.offset ? { offset, el } : closest;
+    }, { offset: -Infinity }).el;
+  };
+  list.addEventListener("dragstart", (e) => {
+    const row = e.target.closest(".ord-row");
+    if (!row) return;
+    dragging = row;
+    row.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+  });
+  list.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    if (!dragging) return;
+    const after = afterElement(e.clientY);
+    if (!after) list.appendChild(dragging);
+    else list.insertBefore(dragging, after);
+  });
+  list.addEventListener("dragend", () => {
+    if (!dragging) return;
+    dragging.classList.remove("dragging");
+    dragging = null;
+    if (!ORD) return;
+    const nums = [...list.querySelectorAll(".ord-row")].map((el) => Number(el.dataset.num));
+    ORD.prs = nums.map((n) => ORD.prs.find((p) => p.number === n)).filter(Boolean);
+    // Re-render to refresh the position numbers.
+    renderConsolidateOrder();
+  });
+}
+
+async function runConsolidateOrder() {
+  if (!ORD || ORD.starting) return;
+  const { repo, strategy } = ORD;
+  const order = ORD.prs.map((p) => p.number);
+  const n = order.length;
+  const verbing = strategy === "rollup" ? "Rolling up" : strategy === "stack" ? "Stacking" : "Sequencing";
+  ORD.starting = true;
+  renderConsolidateOrder();
+  JOBS.set(repo, { status: "queued", kind: strategy, events: [{ type: "log", line: `⏳ ${verbing} ${n} PR(s) in the chosen order…`, level: "info" }] });
   try {
-    const data = await postJSON("/api/consolidate", { repo: r.name, strategy: "stack" });
-    const job = JOBS.get(r.name) || { events: [] };
-    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "stack";
-    JOBS.set(r.name, job);
+    // Rollup keeps its own endpoint (it closes the originals); stack/sequence share /api/consolidate.
+    const data = strategy === "rollup"
+      ? await postJSON("/api/rollup", { repo, numbers: order })
+      : await postJSON("/api/consolidate", { repo, strategy, order });
+    const job = JOBS.get(repo) || { events: [] };
+    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = strategy;
+    JOBS.set(repo, job);
+    closeConsolidateOrder();
+    reattachJobs();
+    toast(`${verbing} ${n} PR(s) on ${repo} — streaming on the card.`);
   } catch (e) {
-    JOBS.delete(r.name);
-    scheduleRender();
-    alert("Couldn't start the stack: " + e.message);
+    ORD.starting = false;
+    JOBS.delete(repo);
+    renderConsolidateOrder();
+    alert(`Couldn't start the ${strategy === "rollup" ? "rollup" : strategy}: ` + e.message);
   }
 }
 
 // Sequence the conflicting cluster: leave N independent PRs but record a merge order and
 // comment it on each. No code changes now — the dashboard auto-rebases each PR once its
 // blocker merges. Fast (no session); resolves the lockfile clash lazily at merge time.
-async function onSequence(r) {
-  const cl = consolidationCluster(r);
-  if (!cl) { alert("No cluster of same-base PRs sharing a lockfile to sequence."); return; }
-  const n = cl.prs.length;
-  const order = cl.prs
-    .slice()
-    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.number - b.number);
-  const listTxt = order.map((p, i) => `${i + 1}. #${p.number} ${(p.title || "").trim()}`).join("\n");
-  if (
-    !(await confirmModal({
-      confirmLabel: `Sequence ${n} PRs`,
-      message:
-        `Sequence ${n} PRs on ${r.nameWithOwner} to merge in this order?\n\n${listTxt}\n\n` +
-        `No branches change now — the dashboard records the order, comments it on each PR, and once a blocker merges it auto-rebases the next one (merge ${cl.base} + regenerate ${cl.lock}). Each PR reviews fully independently. Runs in the background.`,
-    }))
-  )
-    return;
-  JOBS.set(r.name, { status: "queued", events: [{ type: "log", line: `⏳ Sequencing ${n} PR(s)…`, level: "info" }] });
-  reattachJobs();
-  try {
-    const data = await postJSON("/api/consolidate", { repo: r.name, strategy: "sequence" });
-    const job = JOBS.get(r.name) || { events: [] };
-    job.jobId = data.jobId; job.status = data.status || "queued"; job.kind = "sequence";
-    JOBS.set(r.name, job);
-  } catch (e) {
-    JOBS.delete(r.name);
-    scheduleRender();
-    alert("Couldn't start the sequence: " + e.message);
-  }
-}
 
 // Bring one stale/conflicting PR branch up to date: a headless Claude session merges the
 // base in, regenerates lockfiles, resolves conflicts, and pushes. CI then re-runs.
@@ -4048,6 +4130,10 @@ document.addEventListener("keydown", tabNavKeydown);
 // Review console: j/k move comments, x skip, a address, h/l prev/next PR (capture so it
 // runs before the tab-nav handlers; it self-gates on REVIEW being open).
 document.addEventListener("keydown", reviewKeydown, true);
+// Consolidation order modal: Esc closes (self-gates on ORD; ignores when a confirm sits on top).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && ORD && !document.querySelector(".confirm-overlay")) { e.preventDefault(); closeConsolidateOrder(); }
+}, true);
 
 async function loadEmailMode() {
   try {
