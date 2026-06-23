@@ -135,6 +135,8 @@ table.pkgs th, table.pkgs td { text-align: left; padding: 5px 8px; border-bottom
 table.pkgs th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
 table.pkgs td.ver-from { color: var(--muted); white-space: nowrap; }
 table.pkgs td.ver-to { white-space: nowrap; }
+/* Already-satisfied advisory rows (installed ≥ patched floor): dimmed, no action needed. */
+table.pkgs tr.pkg-satisfied td { opacity: 0.5; }
 .pkgs .bump { font-size: 11px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
 .pkgs .bump.major { color: var(--danger); font-weight: 700; }
 .pkgs .bump.minor { color: var(--medium); font-weight: 600; }

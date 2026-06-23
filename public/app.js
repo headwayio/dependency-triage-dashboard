@@ -1773,17 +1773,32 @@ function bumpCell(p) {
   return `<span class="bump patch">patch</span>`;
 }
 
+// An advisory whose installed version already meets/exceeds its patched floor is already
+// satisfied here (a no-op or a stale alert), not outstanding work — so it's shown muted with
+// "✓ patched" instead of a misleading backwards "→ floor" arrow. (Lenient compare matching the
+// rest of the tool; majorRequired stays outstanding since its target is a higher major.)
+function advisorySatisfied(p) {
+  const to = p.target || p.patched;
+  return !!(p.installed && to && !verGt(to, p.installed)); // installed >= to
+}
+
 function pkgTable(pkgs) {
-  const rows = pkgs
+  // Outstanding first, then satisfied (muted) — so the rows that actually need action lead.
+  const ordered = pkgs.slice().sort((a, b) => (advisorySatisfied(a) ? 1 : 0) - (advisorySatisfied(b) ? 1 : 0));
+  const rows = ordered
     .map((p) => {
       const to = p.target || p.patched;
-      return `<tr>
+      const done = advisorySatisfied(p);
+      const toCell = done
+        ? `<span class="muted" title="installed ${esc(p.installed || "?")} already ≥ patched floor ${esc(to || "?")}">✓ patched</span>`
+        : (to ? "→ " + esc(to) : "—");
+      return `<tr${done ? ' class="pkg-satisfied"' : ""}>
         <td><span class="sev-dot ${esc(p.severity)}"></span>${esc(p.severity)}</td>
         <td>${esc(p.ecosystem)}</td>
         <td><code>${esc(p.pkg)}</code></td>
         <td class="ver-from">${p.installed ? esc(p.installed) : "—"}</td>
-        <td class="ver-to">${to ? "→ " + esc(to) : "—"}</td>
-        <td>${bumpCell(p)}</td>
+        <td class="ver-to">${toCell}</td>
+        <td>${done ? "—" : bumpCell(p)}</td>
         <td>${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.ghsa || "view")}</a>` : esc(p.ghsa || "")}</td>
       </tr>`;
     })
