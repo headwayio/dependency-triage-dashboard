@@ -24,6 +24,10 @@ const TABS = [
 // PR-lifecycle tabs (Pending/Passing/Approved) always show, so the bar is stable and a PR
 // visibly advances through fixed columns rather than tabs popping in and out.
 const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered"]);
+// Tabs that are about a DECISION rather than about vulnerabilities, so they also cover
+// repos with no open alerts — pulled from the full org inventory (see withoutAlerts).
+// Each key doubles as the classification it matches.
+const LITE_TABS = new Set(["untriaged", "ignored"]);
 // The three PR-lifecycle tabs — they share CI/review polling, the PR toolbar, and
 // the branch-protection bar. Bucketing among them depends on live CI + review state.
 const PR_TABS = new Set(["pending", "passing", "approved"]);
@@ -309,10 +313,15 @@ function renderSummary() {
 
 function renderTabs() {
   const p = partition();
+  // Untriaged and Ignored also hold repos with no open alerts, which live in the inventory
+  // rather than the alert model — so the total has to fold both in. Getting this wrong on
+  // Untriaged doesn't just under-count: an org whose only unclassified repos are alert-free
+  // would fail the hide-when-empty test below and never show a Triage tab at all.
+  const total = (key) => p[key].length + (LITE_TABS.has(key) ? withoutAlerts(key).length : 0);
   // Untriaged is the default catch-all bucket — hide its tab when empty (it
   // reappears the moment a repo lands there again). Every other tab always shows
   // so its count stays visible at a glance.
-  const tabs = TABS.filter((t) => !HIDE_WHEN_EMPTY.has(t.key) || p[t.key].length > 0);
+  const tabs = TABS.filter((t) => !HIDE_WHEN_EMPTY.has(t.key) || total(t.key) > 0);
   // If the active tab is the one we just hid, fall back to the first visible tab.
   if (!tabs.some((t) => t.key === STATE.tab)) STATE.tab = tabs[0].key;
   // Compliance badge: while repos still need a scope decision, show that triage queue;
@@ -323,9 +332,7 @@ function renderTabs() {
       if (!STATE.complianceData) return "·";
       return STATE.complianceData.summary.inScope; // repos inside the SOC 2 boundary
     }
-    // Ignored also includes ignored repos with no open alerts (pulled from the inventory).
-    if (t.key === "ignored") return p.ignored.length + ignoredWithoutAlerts().length;
-    return p[t.key].length;
+    return total(t.key);
   };
   // Tabs aren't visibly numbered, but respond to 1–5 / 0 (see jumpToTabByNumber + the ? help).
   $("#tabs").innerHTML = tabs
@@ -396,12 +403,16 @@ function renderCards() {
   const content = $("#content");
   const q = (STATE.alertSearch || "").trim().toLowerCase();
   const full = partition()[STATE.tab];
-  // The Ignored tab also surfaces ignored repos with NO open alerts — they never reach the
+  // Untriaged and Ignored also surface repos with NO open alerts — they never reach the
   // alert model, so we pull them from the full inventory and render them as compact rows.
-  const extraIgnored = STATE.tab === "ignored"
-    ? ignoredWithoutAlerts().filter((r) => !q || r.name.toLowerCase().includes(q))
+  // That inventory is pre-loaded on boot, but a tab switch can beat it: kick the load so
+  // the tab fills in rather than claiming everything is classified.
+  const lite = LITE_TABS.has(STATE.tab);
+  if (lite && !STATE.complianceData) loadComplianceData();
+  const extraLite = lite
+    ? withoutAlerts(STATE.tab).filter((r) => !q || r.name.toLowerCase().includes(q))
     : [];
-  if (!full.length && !extraIgnored.length) {
+  if (!full.length && !extraLite.length) {
     const msg = {
       untriaged: "Nothing to triage — every repo is classified 🎉",
       maintained: "No actively-maintained repos with open alerts 🎉",
@@ -453,7 +464,7 @@ function renderCards() {
   STATE.compCursor = Math.max(0, Math.min(STATE.compCursor, STATE.compRows.length - 1));
   const grid = document.createElement("div");
   grid.className = "grid";
-  if (!ordered.length && !extraIgnored.length) {
+  if (!ordered.length && !extraLite.length) {
     grid.innerHTML = `<div class="empty">No repos match “${esc(STATE.alertSearch)}”.</div>`;
   }
   ordered.forEach(({ repo, depth, parentName }, i) => {
@@ -467,18 +478,18 @@ function renderCards() {
     }
     grid.appendChild(c);
   });
-  // Compact rows for ignored repos with no open alerts (continue the cursor index past the cards).
-  if (extraIgnored.length) {
+  // Compact rows for repos with no open alerts (continue the cursor index past the cards).
+  if (extraLite.length) {
     const base = STATE.compRows.length;
-    extraIgnored.forEach((r, j) => {
-      const c = ignoredLiteCard(r);
+    extraLite.forEach((r, j) => {
+      const c = liteCard(r, STATE.tab);
       const idx = base + j;
       c.dataset.idx = idx;
       if (idx === STATE.compCursor) c.classList.add("cursor");
       if (STATE.compSelected.has(r.name)) { c.classList.add("selected"); const cb = c.querySelector(".nav-check"); if (cb) cb.checked = true; }
       grid.appendChild(c);
     });
-    STATE.compRows = STATE.compRows.concat(extraIgnored);
+    STATE.compRows = STATE.compRows.concat(extraLite);
     STATE.compCursor = Math.max(0, Math.min(STATE.compCursor, STATE.compRows.length - 1));
   }
   content.appendChild(grid);
@@ -491,6 +502,15 @@ function renderCards() {
   });
   grid.querySelectorAll(".row-unignore").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); onUnignore(e.currentTarget.closest("[data-repo]").dataset.repo); })
+  );
+  // Track-as on an alert-free untriaged row. These repos live only in the inventory, so
+  // they classify through the same path the Compliance tab uses, not the card's onClassify
+  // (which mutates an alert-model repo that doesn't exist here).
+  grid.querySelectorAll(".lite-cls").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onComplianceClassify(e.currentTarget.closest("[data-repo]").dataset.repo, e.currentTarget.dataset.state);
+    })
   );
   bar.querySelectorAll(".comp-selbar [data-kb]").forEach((b) => b.addEventListener("click", () => navAction(b.dataset.kb)));
   wireSearch(bar, (v) => { STATE.alertSearch = v; }, renderCards); // term is ephemeral (cleared on tab switch)
@@ -531,31 +551,47 @@ function prEntryToolbar(entries) {
   return bar;
 }
 
-// Ignored repos that have NO open alerts, so they never appear in the alert model — pulled
-// from the full inventory (Compliance data) so the Ignored tab can show the complete set.
-function ignoredWithoutAlerts() {
+// Repos with NO open alerts never enter the alert model at all, so the two tabs that are
+// about a *decision* rather than about vulnerabilities would silently miss them: a repo
+// nobody has classified yet, and one already ignored, are both perfectly likely to have
+// nothing flagged. Pull those from the full inventory (the Compliance data — every
+// non-archived org repo) so each tab shows the complete set. The tab key doubles as the
+// classification to match, and repos already in the alert model are excluded so a repo
+// never renders twice.
+function withoutAlerts(classification) {
   const d = STATE.complianceData;
   if (!d || !d.repos) return [];
   const inModel = new Set(((STATE.model && STATE.model.repos) || []).map((r) => r.name));
-  return d.repos.filter((r) => r.classification === "ignored" && !inModel.has(r.name));
+  return d.repos.filter((r) => (r.classification || "untriaged") === classification && !inModel.has(r.name));
 }
 
-// Compact card for an alert-free ignored repo (no alert data to show — just identity + undo).
-function ignoredLiteCard(r) {
+// Compact card for an alert-free repo — there's no alert data to show, just identity and
+// the one decision its tab is for: Track-as on Untriaged, undo on Ignored.
+function liteCard(r, kind) {
   const el = document.createElement("div");
-  el.className = "card alert-row nav-row ignored lite-row";
+  el.className = "card alert-row nav-row lite-row" + (kind === "ignored" ? " ignored" : "");
   el.dataset.repo = r.name;
   const push = r.pushedAt ? relTime(r.pushedAt) : "—";
+  const tag =
+    kind === "ignored"
+      ? `<span class="badge ignored-tag">ignored</span>`
+      : `<span class="badge untriaged-tag">untriaged</span>`;
+  const actions =
+    kind === "ignored"
+      ? `<button class="row-unignore">Un-ignore</button>`
+      : `<div class="classify"><span class="classify-label">Track as</span>` +
+        ENGAGEMENTS.map(([st, lbl]) => `<button class="cls-btn lite-cls" data-state="${st}">${lbl}</button>`).join("") +
+        `</div>`;
   el.innerHTML =
     `<input type="checkbox" class="nav-check" aria-label="select ${esc(r.name)}">` +
     `<div class="ar-body">` +
     `<div class="ar-l1">` +
     `<a class="ar-name" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a>` +
-    `<span class="badge ignored-tag">ignored</span>` +
+    tag +
     `<span class="muted">· no open alerts</span>` +
     `</div>` +
     `<div class="ar-l2"><span class="ar-meta">${r.visibility ? esc(r.visibility.toLowerCase()) + " · " : ""}last push ${esc(push)}</span>` +
-    `<span class="ar-actions"><button class="row-unignore">Un-ignore</button></span></div>` +
+    `<span class="ar-actions">${actions}</span></div>` +
     `</div>`;
   return el;
 }
@@ -599,7 +635,7 @@ async function loadComplianceData(refresh) {
     STATE.complianceData = data;
     renderTabs(); // badge updates even if we're on another tab
     if (STATE.tab === "compliance") drawCompliance();
-    else if (STATE.tab === "ignored") renderCards(); // alert-free ignored repos live in the inventory
+    else if (LITE_TABS.has(STATE.tab)) renderCards(); // alert-free untriaged/ignored repos live in the inventory
     if (data.protectionPending || data.enrichPending) scheduleCompliancePoll();
   } catch (e) {
     if (STATE.tab === "compliance") $("#content").innerHTML = `<div class="banner">Failed to load the inventory: ${esc(e.message)}</div>`;
@@ -1461,15 +1497,19 @@ function archivedRow(r, idx) {
   );
 }
 
-// Set a repo's engagement classification (Track as) from the Compliance tab, then refresh
-// so the derived bits (protection scope/status) catch up with the new engagement.
+// Set a repo's engagement classification (Track as) from the inventory — the Compliance
+// tab's <select>, or an alert-free row on the Untriaged tab — then refresh so the derived
+// bits (protection scope/status) catch up with the new engagement.
 async function onComplianceClassify(repo, stateWanted) {
   const r = STATE.complianceData.repos.find((x) => x.name === repo);
   const from = (r && r.classification) || "untriaged";
   const to = stateWanted || "untriaged";
   if (from === to) return;
   const meta = await engagementNoteModal({ subject: repo, from, to });
-  if (!meta) { drawCompliance(); return; } // cancelled → re-render to reset the <select>
+  // Cancelled → the Compliance tab has to re-render to reset its <select>; the Untriaged
+  // tab's buttons hold no state, and repainting it from here would draw the compliance
+  // table into the wrong tab.
+  if (!meta) { if (STATE.tab === "compliance") drawCompliance(); return; }
   setRowsBusy([repo]);
   try {
     const data = await postJSON("/api/classify", { repo, state: stateWanted, note: meta.note, sowEndDate: meta.sowEndDate });
@@ -1989,7 +2029,7 @@ const TAB_INTROS = {
   monitored: "Inactive-client repos you watch but don't patch — email the client, then mark them notified.",
   notified: "Monitored repos whose client has already been emailed about these vulnerabilities.",
   ignored: "Repos that are out of scope for this tool.",
-  untriaged: "New repos with alerts — classify each as Maintain, Monitor, or Ignore.",
+  untriaged: "Every org repo you haven't classified yet, alerts or not — mark each Maintain, Monitor, or Ignore.",
   covered: "Maintained gems whose constraints already admit every patch — no action needed.",
   compliance: "Full SOC 2 inventory — scope each repo In or Out and track branch protection.",
   archived: "Repos archived on GitHub (read-only).",

@@ -230,6 +230,8 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .card.ignored .ar-name { color: #7c8593; }
 .card.ignored .ar-l1, .card.ignored .ar-status { filter: saturate(0.6); }
 .badge.ignored-tag { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
+/* Amber "needs a decision" tag on alert-free rows in the Untriaged tab. */
+.badge.untriaged-tag { color: var(--medium); background: var(--medium-bg); border-color: #4a3f1c; }
 
 /* Dependency relationships — quiet segments on the card's meta line */
 .dep-meta { white-space: nowrap; }

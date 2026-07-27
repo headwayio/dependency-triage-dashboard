@@ -229,9 +229,15 @@ once — *maintained*, *monitored*, or *ignored* — and that choice (persisted 
 and which actions it gets. Classification is purely local triage: unlike
 **Archive**, it changes nothing on GitHub.
 
+Two tabs are about a *decision* rather than about vulnerabilities, so they also cover
+repos with **no** open alerts (which never reach the alert feed at all): **Untriaged**
+shows every unclassified repo in the org, and **Ignored** shows every ignored one.
+Those alert-free repos come from the same full-org inventory the Compliance tab uses,
+and render as compact rows below the alerted cards.
+
 | Tab | What lands here |
 | --- | --- |
-| **Untriaged** | Not yet classified — the triage inbox. Hidden when empty. |
+| **Untriaged** | Not yet classified — the triage inbox, covering **every** non-archived org repo, alerts or not. Hidden when empty. |
 | **Maintained** | Active client / we host — repos we actually patch. |
 | **Pending PR** | Has an open tool-opened PR whose CI is still running, failing, or being fixed. Takes precedence over every other tab, whatever the classification. |
 | **Passing PR** | Has an open tool-opened PR with **green CI** but no approval yet — awaiting review. Hidden when empty. |
@@ -239,7 +245,7 @@ and which actions it gets. Classification is purely local triage: unlike
 | **Covered** | A maintained **gem** whose constraints already permit every patch — no action needed. Hidden when empty. |
 | **Monitored** | Inactive client we watch but don't patch — we notify them instead. |
 | **Notified** | A monitored repo whose client we've emailed, with no new advisories since. |
-| **Ignored** | Out of scope for this tool. |
+| **Ignored** | Out of scope for this tool — including ignored repos with no open alerts. |
 | **🛡 Compliance** | A *separate* full-org inventory — **every** non-archived repo, not just alerted ones — for the SOC 2 scope decision + branch protection. See [below](#branch-protection--the-compliance-inventory). |
 
 An open tool PR flows through three lifecycle tabs as it progresses —
