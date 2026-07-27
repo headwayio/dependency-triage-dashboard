@@ -779,6 +779,19 @@ const STATE_RANK = { failing: 3, pending: 2, none: 1, unknown: 0, passing: 0 };
 
 async function pollCI() {
   if (!modelCache) return;
+  // Release the fix budget for any repo with no open tool PR left: the work either merged
+  // or was closed, so the fix→new-SHA→fail chain the per-repo cap guards against has
+  // ended. This is the COMMON success path and the all-green sweep below can't see it —
+  // that one only walks repos with open PRs, so a fix whose PR merged leaves its attempts
+  // on the books forever, and enough of those silently cap a repo for a reason that no
+  // longer exists. Runs before the early return, since "nothing pending" is exactly the
+  // case that needs it.
+  for (const r of modelCache.repos) {
+    if (r.archived || (r.pending && (r.openPRs || []).length)) continue;
+    if (activeFixJob(r.name)) continue; // mid-flight — its attempt still counts
+    const cleared = state.clearFixAttempts(r.name);
+    if (cleared) console.log(`  ${r.name}: no open tool PR — released the fix budget (${cleared} record(s) cleared).`);
+  }
   const pending = modelCache.repos.filter((r) => !r.archived && r.pending && (r.openPRs || []).length);
   if (!pending.length) return;
   // Fetch every pending PR's review + CI state in ONE GraphQL call so the poll cost is
