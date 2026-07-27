@@ -13,6 +13,7 @@ const { createUpdatePR } = require("./lib/updater");
 const { buildClientEmail } = require("./lib/email");
 const { run } = require("./lib/exec");
 const ci = require("./lib/ci");
+const dependabot = require("./lib/dependabot");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
 const { createUnblockPR, createMajorUpgradePRs, dedupeMajors, majorsNeedingPR } = require("./lib/upgrader");
@@ -220,10 +221,22 @@ async function enrichCompliance(orgRepos, force) {
     const set = orgRepos.filter((r) => !isDormant(r.pushedAt) || inScope(r.name));
     const work = set.map((r) => ({ name: r.name }));
     await gh.enrichComplianceRepos(config.org, work);
+    // Dependabot health: one org-level policy read, then a pure-local verdict per repo.
+    // Visibility comes from the full org listing (not just the scanned subset), since the
+    // git dep is usually a gem repo nobody would scan on its own.
+    const access = await dependabot.fetchAccess(config.org);
+    const visByName = new Map(orgRepos.map((r) => [r.name, r.visibility]));
     const dependents = {};
     for (const r of work) for (const dep of r.dependsOnOrg || []) (dependents[dep] = dependents[dep] || []).push(r.name);
     const out = {};
-    for (const r of work) out[r.name] = { isGem: r.isGem, published: r.published, dependsOnOrg: r.dependsOnOrg };
+    for (const r of work) {
+      out[r.name] = {
+        isGem: r.isGem,
+        published: r.published,
+        dependsOnOrg: r.dependsOnOrg,
+        dependabot: dependabot.assess(r.gitDeps, access, (n) => visByName.get(n)),
+      };
+    }
     for (const name of Object.keys(dependents)) {
       out[name] = out[name] || {};
       out[name].dependents = dependents[name];
@@ -1594,6 +1607,9 @@ const server = http.createServer(async (req, res) => {
           published: e.published || null,
           dependents: e.dependents || [],
           engagement: engMap[r.name] || null,
+          // "blocked" = an unreachable git dep is silently killing EVERY dependency
+          // update here, so this repo's alert counts can't be trusted (lib/dependabot.js).
+          dependabot: e.dependabot || null,
         };
       });
       const by = (f) => repos.filter(f).length;
@@ -1603,6 +1619,7 @@ const server = http.createServer(async (req, res) => {
         outScope: by((x) => x.scope === "out"),
         overridden: by((x) => x.scopeOverride),
         unprotected: by((x) => x.protectionScope && x.protected === false),
+        dependabotBlocked: by((x) => x.dependabot && x.dependabot.state === "blocked"),
       };
       const archived = archivedRepos.map((r) => ({ name: r.name, url: r.url, pushedAt: r.pushedAt, visibility: r.visibility }));
       return sendJSON(res, 200, { repos, summary, archived, protectionPending, enrichPending });

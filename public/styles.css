@@ -233,6 +233,39 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 /* Amber "needs a decision" tag on alert-free rows in the Untriaged tab. */
 .badge.untriaged-tag { color: var(--medium); background: var(--medium-bg); border-color: #4a3f1c; }
 
+/* Dependabot silently blocked: an unreachable git dep stops ALL updates for that repo.
+   Loud on purpose — it means the repo's alert counts are untrustworthy, not merely stale. */
+.db-blocked {
+  font-size: 11px;
+  font-weight: 650;
+  padding: 1px 7px;
+  border-radius: 20px;
+  white-space: nowrap;
+  color: var(--critical);
+  background: var(--critical-bg);
+  border: 1px solid #5a2326;
+  cursor: help;
+}
+.comp-warn {
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid #5a2326;
+  background: var(--critical-bg);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.comp-warn code { background: rgba(0, 0, 0, 0.3); padding: 1px 5px; border-radius: 4px; }
+.comp-warn-link {
+  font-size: 12px;
+  padding: 2px 10px;
+  margin-left: 4px;
+  color: var(--text);
+  border-color: #5a2326;
+  background: transparent;
+}
+.comp-warn-link:hover { background: rgba(0, 0, 0, 0.25); }
+
 /* Dependency relationships — quiet segments on the card's meta line */
 .dep-meta { white-space: nowrap; }
 

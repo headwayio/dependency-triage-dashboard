@@ -292,14 +292,15 @@ const compRepo = (name, opts = {}) => ({
   protectionScope: !!opts.protectionScope, protected: "protected" in opts ? opts.protected : null,
   isGem: !!opts.isGem, published: opts.published || null, dependents: opts.dependents || [],
   engagement: opts.engagement || null,
+  dependabot: opts.dependabot || { state: "ok", blockedBy: [] },
 });
 
 const complianceRepos = [
   compRepo("acme-rails-app", { scope: "in", classification: "maintained", protectionScope: true, protected: false, pushedAt: days(4), dependents: [] }),
   compRepo("acme-core-gem", { scope: "in", classification: "maintained", protectionScope: true, protected: true, isGem: true, published: { registry: "rubygems" }, dependents: ["acme-rails-app", "acme-api"], pushedAt: days(12) }),
-  compRepo("acme-api", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(9) }),
+  compRepo("acme-api", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(9), dependabot: { state: "blocked", blockedBy: ["acme-private-gem"] } }),
   compRepo("acme-frontend", { scope: "in", classification: "maintained", protectionScope: true, protected: false, pushedAt: days(1) }),
-  compRepo("data-pipeline", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(3) }),
+  compRepo("data-pipeline", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(3), dependabot: { state: "blocked", blockedBy: ["acme-private-gem"] } }),
   compRepo("internal-tools-gem", { scope: "out", scopeDerived: "in", scopeOverride: { scope: "out", reason: "Internal gem — outside the customer boundary.", at: days(20) }, classification: "maintained", isGem: true, published: { registry: "rubygems" }, dependents: ["acme-rails-app"], pushedAt: days(21) }),
   compRepo("client-site-alpha", { classification: "monitored", pushedAt: days(200), engagement: { at: days(90), kind: "engagement", from: "maintained", to: "monitored", note: "SOW ended; client self-manages.", sowEndDate: "2026-03-15" } }),
   compRepo("client-site-beta", { classification: "monitored", pushedAt: days(310) }),
@@ -319,6 +320,7 @@ const compliance = {
     outScope: complianceRepos.filter((r) => r.scope === "out").length,
     overridden: complianceRepos.filter((r) => r.scopeOverride).length,
     unprotected: complianceRepos.filter((r) => r.protectionScope && r.protected === false).length,
+    dependabotBlocked: complianceRepos.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
   },
   archived: [
     { name: "retired-app-2019", url: "https://github.com/acme-corp/retired-app-2019", pushedAt: days(1500), visibility: "PRIVATE" },

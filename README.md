@@ -594,6 +594,39 @@ SOC 2 change-management (CC8.1) wants every in-scope repo's default branch prote
 no merge without review — plus an auditable record of *which* repos are in scope. Two
 features cover that.
 
+### ⚠ Dependabot blocked — when the alert feed is lying
+
+A dependency pulled straight from a git repo (`gem "x", github: "org/x"`,
+`"pkg": "github:org/pkg"`) has to be **cloneable** during resolution. If Dependabot can't
+reach it, the resolver can't build the dependency graph at all — so **every** dependency
+in that project silently stops updating, not just the unreachable one. The update job
+still reports *success*; there's simply no PR and no alert.
+
+That makes it the same class of blind spot as [Hex](#hex--elixir-scanning): the repo
+looks clean because nothing scanned it. Observed on a real repo where one unreachable
+git gem blocked all 28 gems that needed an update — security updates included — for six
+weeks, with nothing in the UI to show for it.
+
+The Compliance tab flags this: affected repos get a red **⚠ dependabot blocked** badge,
+a **⚠ Dependabot blocked** filter appears (only when non-zero), and a banner names the
+exact repos to grant access to. Detection is predictive rather than log-scraping — it
+reads each repo's manifests plus the org's Dependabot access policy
+(`GET /orgs/{org}/dependabot/repository-access`), so it fires the moment someone *adds*
+a private git dep rather than after a run has already failed, and it can name the fix.
+A dep whose visibility can't be determined is treated as reachable: a false "your
+scanning is broken" would train you to ignore the badge.
+
+**The fix is an org setting**, not something the dashboard can apply: Settings → Code
+security → *Dependabot private repository access*, granting the named repo. Via the API:
+
+```bash
+gh api --method PATCH /orgs/<org>/dependabot/repository-access \
+  -F 'repository_ids_to_add[]=<repo-id>'
+```
+
+Repo *visibility* is not the issue — private projects get Dependabot fine. Only the
+git-sourced **dependency** needs to be reachable.
+
 ### Protect branch (rulesets)
 Any repo whose default branch has **no** protection shows a **🔓 unprotected** banner
 and a **🛡 Protect branch** button (`POST /api/protect-branch`; a **🛡 Protect all

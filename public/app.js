@@ -688,6 +688,7 @@ function drawCompliance() {
     in: (r) => r.scope === "in",
     out: (r) => r.scope === "out",
     overridden: (r) => !!r.scopeOverride,
+    blocked: (r) => r.dependabot && r.dependabot.state === "blocked",
     all: () => true,
   };
   // Coerce any stale stored filter (e.g. the old "undecided"/"needs") to a valid one.
@@ -712,9 +713,14 @@ function drawCompliance() {
     ["in", "In scope", s.inScope],
     ["out", "Out of scope", s.outScope],
     ["overridden", "Overridden", s.overridden],
+    // Exception state — shown only when it's non-zero, unlike the standing buckets above.
+    // A permanent "Dependabot blocked 0" would read as noise; its appearing at all is the alarm.
+    ...(s.dependabotBlocked ? [["blocked", "⚠ Dependabot blocked", s.dependabotBlocked]] : []),
     ["all", "All", s.total],
     ["archived", "Archived", (d.archived || []).length],
   ];
+  // Every repo a blocked repo is waiting on — the exact set to grant Dependabot access to.
+  const blockers = [...new Set(d.repos.flatMap((r) => (r.dependabot && r.dependabot.blockedBy) || []))].sort();
 
   // Sortable column headers: click to sort, click again to flip direction.
   const arrow = (key) => (STATE.compSort.key === key ? ` <span class="sort-arrow">${STATE.compSort.dir === 1 ? "▲" : "▼"}</span>` : "");
@@ -745,14 +751,24 @@ function drawCompliance() {
       ? `<div class="comp-note">${(d.archived || []).length} archived repos — read-only, excluded from the active inventory and all dependency/compliance scans. Unarchive to bring one back, or delete to prune it.</div>`
       : `<div class="comp-actions-row">` +
         (s.unprotected ? `<button class="comp-bulk-btn protect-all" data-protect="1">🛡 Protect ${s.unprotected} unprotected</button>` : "") +
-        `</div>`) +
+        `</div>` +
+        // This is a "your scanning is lying to you" warning, not a to-do — it can't be
+        // fixed from here (granting access is an org setting), so it states the blast
+        // radius and names the exact repos to grant rather than offering a button.
+        (s.dependabotBlocked
+          ? `<div class="comp-warn">⚠ <strong>Dependabot is silently broken on ${s.dependabotBlocked} repo${s.dependabotBlocked === 1 ? "" : "s"}.</strong> ` +
+            `It can't clone ${blockers.map((b) => `<code>${esc(b)}</code>`).join(", ")}, so dependency resolution fails and <em>every</em> update there is skipped — security ones included. ` +
+            `Their alert counts are not trustworthy. Fix: grant Dependabot read access to ${blockers.length === 1 ? "that repo" : "those repos"} ` +
+            `(org Settings → Code security → Dependabot private repository access). ` +
+            `<button class="comp-warn-link" data-filter="blocked">Show the affected repos</button></div>`
+          : "")) +
     `<div class="comp-selbar"${STATE.compSelected.size ? "" : " hidden"}>${STATE.compSelected.size ? selBarHtml() : ""}</div>` +
     `<table class="comp-table">${thead}<tbody>` +
     rows.map((r, i) => (onArchived ? archivedRow(r, i) : complianceRow(r, i))).join("") +
     `</tbody></table>` +
     (rows.length === 0 ? `<div class="empty">${onArchived ? "No archived repos." : "No repos in this view 🎉"}</div>` : "");
 
-  content.querySelectorAll(".comp-tab").forEach((b) =>
+  content.querySelectorAll(".comp-tab, .comp-warn-link").forEach((b) =>
     b.addEventListener("click", () => {
       STATE.complianceFilter = b.dataset.filter;
       lsSet("compliance.filter", STATE.complianceFilter);
@@ -1593,6 +1609,10 @@ function complianceRow(r, idx) {
   if (r.published && r.published.registry === "rubygems") typeBadge = ` <span class="gem-tag pub" title="Published gem on rubygems.org">💎 rubygems</span>`;
   else if (r.published && r.published.registry === "npm") typeBadge = ` <span class="gem-tag pub" title="Published package on npm">📦 npm</span>`;
   else if (r.isGem) typeBadge = ` <span class="gem-tag" title="Has a .gemspec but isn't published to rubygems">💎 gem · unpublished</span>`;
+  // Dependabot can't resolve this repo at all — so its "0 alerts" means unscanned, not clean.
+  const db = r.dependabot && r.dependabot.state === "blocked"
+    ? ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`
+    : "";
   // reverse dependency: other org repos that depend on this one
   const deps = (r.dependents || []).length
     ? ` <span class="dep-tag" title="Depended on by: ${esc((r.dependents || []).join(", "))}">↩ used by ${r.dependents.length} repo${r.dependents.length > 1 ? "s" : ""}</span>`
@@ -1629,7 +1649,7 @@ function complianceRow(r, idx) {
   return (
     `<tr class="${cls}" data-repo="${esc(r.name)}" data-idx="${idx}">` +
     `<td class="comp-check-col"><input type="checkbox" class="nav-check"${sel ? " checked" : ""} aria-label="select ${esc(r.name)}"></td>` +
-    `<td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a> <span class="vis">${esc(r.visibility)}</span>${typeBadge}${deps}${dormant}</td>` +
+    `<td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a> <span class="vis">${esc(r.visibility)}</span>${typeBadge}${deps}${dormant}${db}</td>` +
     `<td class="muted">${esc(push)}</td>` +
     `<td class="track-cell">${track}${engBadge}</td>` +
     `<td>${prot}</td>` +
@@ -1726,6 +1746,9 @@ function recomputeComplianceSummary() {
     outScope: reps.filter((r) => r.scope === "out").length,
     overridden: reps.filter((r) => r.scopeOverride).length,
     unprotected: reps.filter((r) => r.protectionScope && r.protected === false).length,
+    // Keep in step with the server's summary (server.js /api/compliance) — this runs after
+    // a local mutation (archive/delete), and a dropped key would hide the warning banner.
+    dependabotBlocked: reps.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
   };
 }
 
