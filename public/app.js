@@ -2284,10 +2284,23 @@ function prChips(r) {
       // from the most recent PR, open or closed). Only on a NON-draft PR: GitHub doesn't
       // notify requested reviewers while a PR is a draft, so gate it behind the draft→ready
       // flip below — request a review only once the PR is actually ready for one.
-      const sr = r.suggestedReviewer;
-      const alreadyReq = sr && (pr.reviewers || []).map(String).includes(sr.display);
-      const reviewBtn = sr && !pr.draft && !alreadyReq && pr.reviewDecision !== "APPROVED"
-        ? `<button class="pr-act act-request-review" data-number="${pr.number}" data-reviewer="${esc(sr.handle)}" title="Request a review from @${esc(sr.display)} on this PR">👤 Request review from @${esc(sr.display)}</button>`
+      const rc = reviewerChoices(r, pr);
+      const reviewBtn = rc.def && !pr.draft && pr.reviewDecision !== "APPROVED"
+        ? `<span class="pr-act rr">` +
+          `<span class="rr-label">👤 Request review from</span>` +
+          `<span class="dd rr-dd">` +
+          `<button class="rr-chip act-request-review" data-number="${pr.number}" data-reviewer="${esc(rc.def.handle)}" title="Request a review from @${esc(rc.def.display)} on this PR">@${esc(rc.def.display)}</button>` +
+          `<button class="dd-trigger rr-caret" data-open title="Request someone else instead">▾</button>` +
+          `<div class="dd-menu" hidden>` +
+          `<div class="menu-section">${rc.fromHistory ? "Reviewed this repo" : `${esc(STATE.model.org || "org")} members`}</div>` +
+          rc.opts
+            .map((o) =>
+              o.requested
+                ? `<button class="rr-opt" disabled title="Already requested on this PR">✓ @${esc(o.display)}<span class="rr-hint">requested</span></button>`
+                : `<button class="rr-opt" data-number="${pr.number}" data-reviewer="${esc(o.handle)}" title="Request a review from @${esc(o.display)} on this PR">@${esc(o.display)}${o.isTeam ? `<span class="rr-hint">team</span>` : ""}</button>`
+            )
+            .join("") +
+          `</div></span></span>`
         : "";
       const readyBtn = pr.draft
         ? `<button class="pr-act act-ready-pr" data-number="${pr.number}" title="Mark this draft PR as ready for review on GitHub">Mark ready for review</button>`
@@ -3353,15 +3366,34 @@ async function onFixCI(r) {
   }
 }
 
+// Who the "Request review" control offers for one PR. The repo's OWN history leads
+// (most-recent-first, so the person you usually ask is the default); a repo nobody has
+// reviewed yet has no history to suggest from, so it falls back to the org roster rather
+// than showing nothing. Anyone already requested on THIS PR is flagged, not hidden — the
+// menu shows them ticked so it's clear why they aren't offered, and the default skips to
+// the first person who could still be asked.
+function reviewerChoices(r, pr) {
+  const already = new Set((pr.reviewers || []).map(String));
+  const history = r.reviewerOptions || [];
+  const fromHistory = history.length > 0;
+  const pool = fromHistory ? history : ((STATE.model && STATE.model.orgMembers) || []);
+  const opts = pool.map((o) => ({ ...o, requested: already.has(o.display) }));
+  return { opts, fromHistory, def: opts.find((o) => !o.requested) || null };
+}
+
 // One-click "request review from @who" on a single PR (who = r.suggestedReviewer,
 // resolved server-side). Reflects the request in the model + re-renders, no Refresh.
-async function onRequestReview(r, btn) {
+// `btn` carries the choice (data-number / data-reviewer); `busyEl` is where to show it
+// working. They differ when the click came from the dropdown — that menu item is hidden
+// the moment the menu closes, so the feedback belongs on the chip that stays visible.
+async function onRequestReview(r, btn, busyEl) {
   const number = Number(btn.dataset.number);
   const reviewer = btn.dataset.reviewer;
   const display = reviewer.split("/").pop();
-  btn.disabled = true;
-  const old = btn.innerHTML;
-  btn.textContent = "Requesting…";
+  const target = busyEl || btn;
+  target.disabled = true;
+  const old = target.innerHTML;
+  target.textContent = "Requesting…";
   try {
     const data = await postJSON("/api/request-review", { repo: r.name, number, reviewer });
     const pr = (r.openPRs || []).find((p) => p.number === number);
@@ -3371,8 +3403,8 @@ async function onRequestReview(r, btn) {
     }
     scheduleRender();
   } catch (e) {
-    btn.disabled = false;
-    btn.innerHTML = old;
+    target.disabled = false;
+    target.innerHTML = old;
     alert("Couldn't request review: " + e.message);
   }
 }
@@ -3540,6 +3572,15 @@ function card(r, nesting) {
     b.addEventListener("click", () => copyRich(anchorHtml(b.dataset.url, b.dataset.label), b.dataset.url, b))
   );
   el.querySelectorAll(".act-request-review").forEach((b) => b.addEventListener("click", () => onRequestReview(r, b)));
+  // Picking someone from the dropdown requests them immediately — same as clicking the
+  // chip, no confirm step. Busy state goes on the chip since the menu closes.
+  el.querySelectorAll(".rr-opt[data-reviewer]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const chip = b.closest(".rr-dd").querySelector(".rr-chip");
+      closeAllMenus();
+      onRequestReview(r, b, chip);
+    })
+  );
   el.querySelectorAll(".act-ready-pr").forEach((b) => b.addEventListener("click", () => onReadyForReview(r, b)));
   // Per-PR buttons: bind EACH (a card can hold several PRs) and pass the button so the
   // handler reads the right data-number — `on()` only binds the first match + passes the card.

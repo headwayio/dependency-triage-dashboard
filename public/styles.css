@@ -584,6 +584,28 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
    not wear it (a green ✓ pill reads as "this PR IS ready", not "click to mark it ready"). */
 .pr-act { white-space: nowrap; font-size: 12px; padding: 3px 10px; border-radius: 6px; }
 .pr-act:disabled { opacity: 0.6; }
+
+/* Request-review control: static label + a chip/caret pair that reads as one button.
+   The label is text, not part of the hit area — only the name and the caret are clickable,
+   so it's obvious that the NAME is the thing you're acting on and can be changed. */
+.rr { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: none; background: none; }
+.rr-label { color: var(--muted); font-size: 12px; }
+.rr-dd { display: inline-flex; }
+.rr-chip, .rr-caret {
+  font-size: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 3px 10px;
+}
+.rr-chip { border-radius: 6px 0 0 6px; border-right: none; font-weight: 600; }
+.rr-caret { border-radius: 0 6px 6px 0; padding: 3px 7px; color: var(--muted); }
+.rr-chip:hover, .rr-caret:hover { background: #232b3a; color: var(--text); }
+.rr-chip:disabled, .rr-caret:disabled { opacity: 0.6; }
+/* Keep the pair visually joined while either half is focused/open. */
+.rr-dd:hover .rr-chip, .rr-dd:hover .rr-caret { border-color: var(--muted); }
+.dd-menu .rr-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.rr-hint { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .pending-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .pending-toolbar:empty { display: none; } /* no bulk button (e.g. <2 repos) → don't reserve space */
 .copy-all, .open-all { font-weight: 600; }

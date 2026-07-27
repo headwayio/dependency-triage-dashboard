@@ -172,6 +172,11 @@ const repos = [
     contact: null, notifiedAt: null, newAdvisoryCount: 0, disposition: null,
     // CI green, but no approval yet → lands in the "Passing PR" tab awaiting review.
     openPRs: [{ number: 89, url: "https://github.com/acme-corp/checkout-api/pull/89", draft: false, reviewDecision: null, reviewers: ["caseylee"] }],
+    reviewerOptions: [
+      { handle: "caseylee", display: "caseylee", isTeam: false },
+      { handle: "jordanp", display: "jordanp", isTeam: false },
+      { handle: "acme-corp/platform", display: "platform", isTeam: true },
+    ],
     engagement: null,
   },
   {
@@ -254,7 +259,11 @@ const repos = [
   },
 ];
 
-const model = { org: "acme-corp", generatedAt: new Date().toISOString(), repos };
+const model = {
+  org: "acme-corp", generatedAt: new Date().toISOString(), repos,
+  // Fallback roster for a repo nobody has reviewed yet (reviewerOptions empty).
+  orgMembers: ["ana-dev", "caseylee", "jordanp", "morgan-ops", "sam-qa"].map((h) => ({ handle: h, display: h, isTeam: false })),
+};
 
 // ---- side-channel fixtures ---------------------------------------------------
 const eolStatus = {

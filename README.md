@@ -488,6 +488,22 @@ A PR that's **behind** its base or **conflicting** shows a Rebase button. It lau
 headless session that merges the base in, regenerates the lockfile, resolves conflicts, and
 pushes — CI then re-runs. (`createRebasePR` in `lib/rollup.js`, `/api/rebase`.)
 
+### 👤 Request review
+
+A ready (non-draft, unapproved) PR shows **Request review from @who** — a static label plus
+a name chip with a **▾** caret. Clicking the chip requests that person immediately; the caret
+opens a picker and choosing someone there requests them immediately too (no confirm step).
+
+The default is the person you normally ask on **that repo**: reviewers are collected from its
+last 30 PRs, open and closed, most-recent-first — whoever was requested, else whoever actually
+reviewed. Anyone already requested on the PR is shown ticked and unselectable, and the default
+skips past them, so a PR that already has one reviewer can still get a second.
+
+A repo nobody has reviewed yet has no history to suggest from, so the picker falls back to the
+**org roster** (`/orgs/{org}/members`, cached an hour). The authed user is filtered out of both
+lists — every tool PR is authored by them, and GitHub rejects a self-review request. Teams are
+supported and requested as `org/slug`.
+
 ### 💬 Review console (Copilot + reviewer comments)
 
 A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
