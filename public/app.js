@@ -1064,6 +1064,7 @@ async function kbTrack(toState) {
   for (const name of changing) {
     try {
       await postJSON("/api/classify", { repo: name, state: toState, note: meta.note, sowEndDate: meta.sowEndDate });
+      syncModelClassification(name, toState);
     } catch {
       /* keep going */
     }
@@ -1472,12 +1473,21 @@ async function onComplianceClassify(repo, stateWanted) {
   setRowsBusy([repo]);
   try {
     const data = await postJSON("/api/classify", { repo, state: stateWanted, note: meta.note, sowEndDate: meta.sowEndDate });
+    syncModelClassification(repo, data.state);
     toast(`${repo} tracked as ${engagementLabel(data.state)}.`);
     loadComplianceData(); // re-derive scope/protection with the new classification (clears busy on re-render)
   } catch (e) {
     clearRowBusy();
     alert("Couldn't classify: " + e.message);
   }
+}
+
+// A repo can sit in BOTH the inventory and the alert model. Classifying it from the
+// inventory has to update the model's copy too, or the alert tabs keep bucketing it by the
+// old engagement until the next Refresh.
+function syncModelClassification(repo, stateApplied) {
+  const mr = STATE.model && STATE.model.repos.find((x) => x.name === repo);
+  if (mr) mr.classification = stateApplied || "untriaged";
 }
 
 async function onComplianceUnarchive(repo) {
