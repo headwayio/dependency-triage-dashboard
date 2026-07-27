@@ -590,22 +590,48 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
    so it's obvious that the NAME is the thing you're acting on and can be changed. */
 .rr { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: none; background: none; }
 .rr-label { color: var(--muted); font-size: 12px; }
-.rr-dd { display: inline-flex; }
-.rr-chip, .rr-caret {
+/* .dd (later in this file, same specificity) sets display:inline-block, which would win and
+   leave this a non-flex container — silently disabling the caret's align-self:stretch. */
+.dd.rr-dd { display: inline-flex; }
+/* Scoped under .rr-dd deliberately: this control renders inside `.srow`, whose
+   `.srow button` rule (0,1,1) out-specifies a bare `.rr-caret` (0,1,0) and silently won
+   the font-size and padding. Two classes puts these at (0,2,0) so they hold regardless
+   of source order. */
+.rr-dd .rr-chip, .rr-dd .rr-caret {
   font-size: 12px;
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--text);
   padding: 3px 10px;
 }
-.rr-chip { border-radius: 6px 0 0 6px; border-right: none; font-weight: 600; }
-.rr-caret { border-radius: 0 6px 6px 0; padding: 3px 7px; color: var(--muted); }
-.rr-chip:hover, .rr-caret:hover { background: #232b3a; color: var(--text); }
-.rr-chip:disabled, .rr-caret:disabled { opacity: 0.6; }
+.rr-dd .rr-chip { border-radius: 6px 0 0 6px; border-right: none; font-weight: 600; }
+/* The caret is the only hint that the name is changeable, so it's sized to be noticed.
+   The glyph is ▼ (U+25BC), NOT ▾ (U+25BE) — the latter is the "small triangle" codepoint
+   and stays visually tiny however far you push font-size. align-self:stretch pins the
+   button's height to the chip's so the bigger glyph can't make the pair uneven, and
+   line-height:1 stops it adding vertical padding of its own. */
+.rr-dd .rr-caret {
+  border-radius: 0 6px 6px 0;
+  padding: 0 10px;
+  color: var(--text);
+  font-size: 10px; /* ▼ is a chunky glyph — it out-weighs the 12px name text well below 12px */
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+}
+.rr-dd .rr-chip:hover, .rr-dd .rr-caret:hover { background: #232b3a; color: var(--text); }
+.rr-dd .rr-chip:disabled, .rr-dd .rr-caret:disabled { opacity: 0.6; }
 /* Keep the pair visually joined while either half is focused/open. */
 .rr-dd:hover .rr-chip, .rr-dd:hover .rr-caret { border-color: var(--muted); }
-.dd-menu .rr-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* Picker rows are toggles, so they get a fixed tick column — without it, names would
+   shift sideways as you tick and untick them. */
+.dd-menu .rr-opt { display: flex; align-items: center; gap: 8px; }
+.rr-tick { width: 12px; flex: 0 0 12px; color: var(--accent); font-weight: 700; }
+.rr-opt.on .rr-who { color: var(--text); font-weight: 600; }
+.rr-who { flex: 1; }
 .rr-hint { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.rr-foot { font-size: 10px; color: var(--muted); padding: 6px 10px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
 .pending-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .pending-toolbar:empty { display: none; } /* no bulk button (e.g. <2 repos) → don't reserve space */
 .copy-all, .open-all { font-weight: 600; }

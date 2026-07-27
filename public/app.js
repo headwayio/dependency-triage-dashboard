@@ -1782,7 +1782,52 @@ function flashCard(name) {
 }
 
 function closeAllMenus() {
+  flushReviewerEdits(); // the reviewer picker batches its changes until it closes
   document.querySelectorAll(".dd-menu:not([hidden])").forEach((m) => (m.hidden = true));
+}
+
+// The reviewer picker is an editor, not a menu of actions: ticking and unticking names
+// only changes local state, and the whole diff is sent as ONE `gh pr edit` when the menu
+// closes. Applying per click would fire a request for every keystroke-equivalent — and
+// worse, an accidental untick would immediately un-request someone with no chance to undo
+// it before the menu shut. RR_EDIT holds the open picker's state; only one menu is ever
+// open (closeAllMenus is the single choke point), so a single slot is enough.
+let RR_EDIT = null;
+
+function beginReviewerEdit(repo, menu) {
+  const current = new Set(
+    [...menu.querySelectorAll(".rr-opt.on")].map((b) => b.dataset.reviewer)
+  );
+  RR_EDIT = { repo, number: Number(menu.dataset.number), menu, original: new Set(current), current };
+}
+
+// Send the accumulated diff. Called from closeAllMenus, so every close path — the caret,
+// clicking outside, opening another menu — applies rather than silently discarding.
+function flushReviewerEdits() {
+  const ed = RR_EDIT;
+  RR_EDIT = null;
+  if (!ed) return;
+  const add = [...ed.current].filter((h) => !ed.original.has(h));
+  const remove = [...ed.original].filter((h) => !ed.current.has(h));
+  if (!add.length && !remove.length) return;
+  const r = (STATE.model.repos || []).find((x) => x.name === ed.repo);
+  if (!r) return;
+  const chip = ed.menu.closest(".rr-dd") && ed.menu.closest(".rr-dd").querySelector(".rr-chip");
+  if (chip) { chip.disabled = true; chip.textContent = "Saving…"; }
+  postJSON("/api/request-review", { repo: ed.repo, number: ed.number, add, remove })
+    .then((data) => {
+      const pr = (r.openPRs || []).find((p) => p.number === ed.number);
+      if (pr) {
+        pr.reviewers = data.reviewers || pr.reviewers || [];
+        if (!pr.reviewers.length) pr.reviewDecision = null; // nobody left to review it
+        else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+      }
+      scheduleRender();
+    })
+    .catch((e) => {
+      scheduleRender(); // drop the optimistic ticks; the next poll re-syncs the truth
+      alert("Couldn't update reviewers: " + e.message);
+    });
 }
 function toggleMenu(e, trigger) {
   e.stopPropagation();
@@ -2285,21 +2330,31 @@ function prChips(r) {
       // notify requested reviewers while a PR is a draft, so gate it behind the draft→ready
       // flip below — request a review only once the PR is actually ready for one.
       const rc = reviewerChoices(r, pr);
-      const reviewBtn = rc.def && !pr.draft && pr.reviewDecision !== "APPROVED"
+      // Shown whenever there's anyone to pick from — not just anyone left to ADD. Gating on
+      // rc.def would hide the control once everyone is requested, which is exactly when you
+      // need it to remove someone. The chip then falls back to the first name, disabled.
+      const rcLead = rc.def || rc.opts[0];
+      const reviewBtn = rcLead && !pr.draft && pr.reviewDecision !== "APPROVED"
         ? `<span class="pr-act rr">` +
           `<span class="rr-label">👤 Request review from</span>` +
           `<span class="dd rr-dd">` +
-          `<button class="rr-chip act-request-review" data-number="${pr.number}" data-reviewer="${esc(rc.def.handle)}" title="Request a review from @${esc(rc.def.display)} on this PR">@${esc(rc.def.display)}</button>` +
-          `<button class="dd-trigger rr-caret" data-open title="Request someone else instead">▾</button>` +
-          `<div class="dd-menu" hidden>` +
+          (rc.def
+            ? `<button class="rr-chip act-request-review" data-number="${pr.number}" data-reviewer="${esc(rc.def.handle)}" title="Request a review from @${esc(rc.def.display)} on this PR">@${esc(rc.def.display)}</button>`
+            : `<button class="rr-chip" disabled title="Everyone here is already requested — use ▼ to remove someone">@${esc(rcLead.display)}</button>`) +
+          `<button class="dd-trigger rr-caret" data-open title="Add or remove reviewers">▼</button>` +
+          `<div class="dd-menu rr-menu" data-number="${pr.number}" hidden>` +
           `<div class="menu-section">${rc.fromHistory ? "Reviewed this repo" : `${esc(STATE.model.org || "org")} members`}</div>` +
           rc.opts
-            .map((o) =>
-              o.requested
-                ? `<button class="rr-opt" disabled title="Already requested on this PR">✓ @${esc(o.display)}<span class="rr-hint">requested</span></button>`
-                : `<button class="rr-opt" data-number="${pr.number}" data-reviewer="${esc(o.handle)}" title="Request a review from @${esc(o.display)} on this PR">@${esc(o.display)}${o.isTeam ? `<span class="rr-hint">team</span>` : ""}</button>`
+            .map(
+              (o) =>
+                `<button class="rr-opt${o.requested ? " on" : ""}" data-reviewer="${esc(o.handle)}" aria-pressed="${o.requested}" title="Click to ${o.requested ? "remove" : "request"} @${esc(o.display)} — applied when you close this menu">` +
+                `<span class="rr-tick">${o.requested ? "✓" : ""}</span>` +
+                `<span class="rr-who">@${esc(o.display)}</span>` +
+                (o.isTeam ? `<span class="rr-hint">team</span>` : "") +
+                `</button>`
             )
             .join("") +
+          `<div class="rr-foot">Applied when this menu closes</div>` +
           `</div></span></span>`
         : "";
       const readyBtn = pr.draft
@@ -3572,13 +3627,25 @@ function card(r, nesting) {
     b.addEventListener("click", () => copyRich(anchorHtml(b.dataset.url, b.dataset.label), b.dataset.url, b))
   );
   el.querySelectorAll(".act-request-review").forEach((b) => b.addEventListener("click", () => onRequestReview(r, b)));
-  // Picking someone from the dropdown requests them immediately — same as clicking the
-  // chip, no confirm step. Busy state goes on the chip since the menu closes.
+  // Opening the picker snapshots who's currently requested, so the close can diff against it.
+  el.querySelectorAll(".rr-caret").forEach((c) =>
+    c.addEventListener("click", () => {
+      const menu = c.parentElement.querySelector(".rr-menu");
+      if (menu && !menu.hidden) beginReviewerEdit(r.name, menu); // toggleMenu already ran
+    })
+  );
+  // Ticking a name only edits local state — the batch is sent by closeAllMenus.
   el.querySelectorAll(".rr-opt[data-reviewer]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const chip = b.closest(".rr-dd").querySelector(".rr-chip");
-      closeAllMenus();
-      onRequestReview(r, b, chip);
+    b.addEventListener("click", (e) => {
+      e.stopPropagation(); // keep the menu open; this is an editor, not an action list
+      if (!RR_EDIT) return;
+      const handle = b.dataset.reviewer;
+      const on = !RR_EDIT.current.has(handle);
+      if (on) RR_EDIT.current.add(handle);
+      else RR_EDIT.current.delete(handle);
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+      b.querySelector(".rr-tick").textContent = on ? "✓" : "";
     })
   );
   el.querySelectorAll(".act-ready-pr").forEach((b) => b.addEventListener("click", () => onReadyForReview(r, b)));

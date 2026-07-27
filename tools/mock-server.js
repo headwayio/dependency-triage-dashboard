@@ -403,6 +403,20 @@ http.createServer((req, res) => {
       if (route === "/api/scope-override") return json(res, { repo: b.repo, scope: b.scope || "out", override: b.scope ? { scope: b.scope, reason: b.reason } : null, derived: "out" });
       if (route === "/api/protect-branch") return json(res, { repo: b.repo, branch: "main", updated: false, rulesetId: 1 });
       if (route === "/api/unprotect-branch") return json(res, { repo: b.repo, removed: true, stillProtected: false, via: null });
+      // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
+      // the picker renders from that response, so a canned reply would make it look broken.
+      if (route === "/api/request-review") {
+        const repo = repos.find((r) => r.name === b.repo);
+        const pr = repo && (repo.openPRs || []).find((p) => p.number === Number(b.number));
+        const display = (h) => String(h).split("/").pop();
+        const add = Array.isArray(b.add) ? b.add : b.reviewer ? [b.reviewer] : [];
+        const gone = new Set((Array.isArray(b.remove) ? b.remove : []).map(display));
+        const reviewers = pr
+          ? [...new Set([...(pr.reviewers || []).filter((x) => !gone.has(x)), ...add.map(display)])]
+          : [];
+        if (pr) pr.reviewers = reviewers; // persists for this process, so a re-render agrees
+        return json(res, { repo: b.repo, number: Number(b.number), added: add, removed: [...gone], reviewers });
+      }
       json(res, { ok: true });
     });
     return;

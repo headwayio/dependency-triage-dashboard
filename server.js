@@ -1184,26 +1184,38 @@ const server = http.createServer(async (req, res) => {
 
     // Add a reviewer to one PR (the dashboard's one-click "Request review from @who").
     if (req.method === "POST" && route === "/api/request-review") {
-      const { repo, number, reviewer } = await repoBody(req);
+      // Takes a batch: `add`/`remove` handle arrays (the picker applies its whole diff in
+      // one call when it closes), or a single `reviewer` for the one-click chip.
+      const { repo, number, reviewer, add, remove } = await repoBody(req);
       const num = Number(number);
       if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
-      const handle = String(reviewer || "").trim();
-      if (!handle || !/^[A-Za-z0-9._/-]+$/.test(handle)) return sendJSON(res, 400, { error: "Valid reviewer handle required." });
+      const clean = (v) => (Array.isArray(v) ? v : []).map((x) => String(x || "").trim()).filter(Boolean);
+      const toAdd = add === undefined && reviewer ? [String(reviewer).trim()] : clean(add);
+      const toRemove = clean(remove);
+      if (!toAdd.length && !toRemove.length) return sendJSON(res, 400, { error: "Nothing to change." });
+      const bad = [...toAdd, ...toRemove].find((h) => !/^[A-Za-z0-9._/-]+$/.test(h));
+      if (bad) return sendJSON(res, 400, { error: `Invalid reviewer handle: ${bad}` });
       const nwo = `${config.org}/${repo}`;
-      const out = await run("gh", ["pr", "edit", String(num), "--repo", nwo, "--add-reviewer", handle]);
+      const args = ["pr", "edit", String(num), "--repo", nwo];
+      for (const h of toAdd) args.push("--add-reviewer", h);
+      for (const h of toRemove) args.push("--remove-reviewer", h);
+      const out = await run("gh", args);
       if (out.code !== 0) return sendJSON(res, 502, { error: (out.stderr || "gh pr edit failed").trim() });
-      // Reflect the request in the cache so the badge updates without a full Refresh.
+      // Reflect the change in the cache so the badge updates without a full Refresh.
+      // `reviewers` holds display names (login, or a team's slug), so compare on those.
       let reviewers = null;
       if (modelCache) {
         const r = modelCache.repos.find((x) => x.name === repo);
         const pr = r && (r.openPRs || []).find((p) => p.number === num);
         if (pr) {
-          pr.reviewers = Array.from(new Set([...(pr.reviewers || []), handle.split("/").pop()]));
-          if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+          const gone = new Set(toRemove.map((h) => h.split("/").pop()));
+          const next = (pr.reviewers || []).filter((x) => !gone.has(x));
+          pr.reviewers = Array.from(new Set([...next, ...toAdd.map((h) => h.split("/").pop())]));
+          if (pr.reviewers.length && !pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
           reviewers = pr.reviewers;
         }
       }
-      return sendJSON(res, 200, { repo, number: num, reviewer: handle, reviewers });
+      return sendJSON(res, 200, { repo, number: num, added: toAdd, removed: toRemove, reviewers });
     }
 
     // Flip one draft PR to ready-for-review.

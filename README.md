@@ -491,13 +491,19 @@ pushes — CI then re-runs. (`createRebasePR` in `lib/rollup.js`, `/api/rebase`.
 ### 👤 Request review
 
 A ready (non-draft, unapproved) PR shows **Request review from @who** — a static label plus
-a name chip with a **▾** caret. Clicking the chip requests that person immediately; the caret
-opens a picker and choosing someone there requests them immediately too (no confirm step).
+a name chip with a **▼** caret. Clicking the chip requests that person immediately.
+
+The caret opens a **picker, not a menu of actions**: names tick and untick, and the whole diff
+is sent as one `gh pr edit --add-reviewer … --remove-reviewer …` when the menu closes (every
+close path funnels through `closeAllMenus`). Applying per click would fire a request per
+toggle, and an accidental untick would un-request someone with no chance to put them back
+before the menu shut. A close with no changes sends nothing.
 
 The default is the person you normally ask on **that repo**: reviewers are collected from its
 last 30 PRs, open and closed, most-recent-first — whoever was requested, else whoever actually
-reviewed. Anyone already requested on the PR is shown ticked and unselectable, and the default
-skips past them, so a PR that already has one reviewer can still get a second.
+reviewed. Anyone already requested is ticked, and the chip's default skips past them, so a PR
+that already has one reviewer can still get a second. Once everyone is requested the chip goes
+inert but the caret stays live — otherwise there'd be no way to remove anyone.
 
 A repo nobody has reviewed yet has no history to suggest from, so the picker falls back to the
 **org roster** (`/orgs/{org}/members`, cached an hour). The authed user is filtered out of both
