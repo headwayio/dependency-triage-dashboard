@@ -889,12 +889,19 @@ function clearSelection() {
 }
 function selBarHtml() {
   const n = STATE.compSelected.size;
+  // Untriaged leads with the three Track-as choices — with a whole org to classify, doing
+  // it one card at a time is the slow path.
+  const track =
+    `<button class="selbar-btn" data-kb="m">Maintain <kbd>m</kbd></button> ` +
+    `<button class="selbar-btn" data-kb="w">Monitor <kbd>w</kbd></button> ` +
+    `<button class="selbar-btn" data-kb="i">Ignore <kbd>i</kbd></button> `;
   const btns =
     STATE.tab === "compliance"
       ? `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
         `<button class="selbar-btn" data-kb="s">Out of scope <kbd>s</kbd></button> ` +
         `<button class="selbar-btn" data-kb="n">Needs compliance <kbd>n</kbd></button> `
-      : `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
+      : (STATE.tab === "untriaged" ? track : "") +
+        `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
         `<button class="selbar-btn" data-kb="y">Copy links <kbd>y</kbd></button> `;
   return `<strong>${n}</strong> selected · ${btns}<button class="selbar-btn subtle" data-kb="clear">Clear <kbd>Esc</kbd></button>`;
 }
@@ -932,6 +939,15 @@ function navAction(key) {
     if (key === "w") return kbTrack("monitored");
     if (key === "i") return kbTrack("ignored");
     return;
+  }
+  // Triaging is the Untriaged tab's whole job, and it's the one alert tab whose rows can be
+  // alert-free inventory repos — so it takes Compliance's Track-as mnemonics. `m` means
+  // Maintain here rather than "mark ready for review" (a PR action that belongs to the PR
+  // tabs, and is still on the card's own button).
+  if (STATE.tab === "untriaged") {
+    if (key === "m") return kbTrack("maintained");
+    if (key === "w") return kbTrack("monitored");
+    if (key === "i") return kbTrack("ignored");
   }
   if (key === "e") return kbArchiveAlert();
   if (key === "#") return kbDelete();
@@ -1087,6 +1103,9 @@ function kbEmail() {
 async function kbTrack(toState) {
   const names = selectedOrCursor();
   if (!names.length) return;
+  // Reads the inventory, not the alert model — it's the list that has every repo, alerted
+  // or not. On the Untriaged tab it can still be mid-load.
+  if (!STATE.complianceData) { toast("The org inventory is still loading…"); return; }
   const clsOf = (n) => { const r = STATE.complianceData.repos.find((x) => x.name === n); return (r && r.classification) || "untriaged"; };
   const changing = names.filter((n) => clsOf(n) !== toState);
   if (!changing.length) { toast(`Already ${engagementLabel(toState)}.`); return; }
@@ -1309,6 +1328,7 @@ function showShortcutHelp() {
   const k = (...keys) => keys.map((s) => `<kbd>${esc(s)}</kbd>`).join("");
   const row = (keys, desc) => `<div class="kbd-keys">${keys}</div><div class="kbd-desc">${desc}</div>`;
   const onCompliance = STATE.tab === "compliance";
+  const onUntriaged = STATE.tab === "untriaged";
   const sections = [
     ["Navigate", [
       [k("h") + "/" + k("l"), "previous / next tab"],
@@ -1333,11 +1353,14 @@ function showShortcutHelp() {
       [k("p"), "protect the branch (maintained repos)"],
       [k("m") + " / " + k("w") + " / " + k("i"), "Track as Maintain / Monitor / Ignore"],
     ] : [
+      // Untriaged rebinds m to Maintain and adds w/i, so it can't advertise
+      // "mark ready for review" — see navAction / tabActionKeys.
+      [onUntriaged ? k("m") + " / " + k("w") + " / " + k("i") : "", onUntriaged ? "Track as Maintain / Monitor / Ignore (selected, or cursor row)" : ""],
       [k("u"), "open an update PR / re-run"],
       [k("U"), "propose a runtime upgrade (EOL)"],
       [k("R"), "roll up ready PRs into one release PR"],
       [k("c"), "review comments (first PR with feedback)"],
-      [k("m"), "mark a draft PR ready for review"],
+      [onUntriaged ? "" : k("m"), onUntriaged ? "" : "mark a draft PR ready for review"],
       [k("a"), "assign / request review (first eligible PR)"],
       [k("p"), "protect the branch"],
       [k("f"), "fix failing CI"],
@@ -1370,7 +1393,10 @@ function toast(msg) {
 }
 // Per-tab action keys (movement/select/search/copy are shared; these differ by tab).
 function tabActionKeys() {
-  return STATE.tab === "compliance" ? "e#rpmwi" : "e#rupfURcma";
+  if (STATE.tab === "compliance") return "e#rpmwi";
+  // Untriaged adds the Track-as keys (w/i) and rebinds m to Maintain — see navAction.
+  if (STATE.tab === "untriaged") return "e#rupfURcamwi";
+  return "e#rupfURcma";
 }
 // Two-stage search Esc: the input's first Esc blurs + arms this window; a second Esc
 // shortly after clears the kept term. Placed before the compRows guard so it still works

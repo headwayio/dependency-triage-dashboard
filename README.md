@@ -255,7 +255,9 @@ to merging. Archived repos drop out of GitHub's alert feed entirely, so there's 
 archived tab. The headline **"to maintain"** count is Maintained + Pending + Passing
 + Approved (open PRs still count as work until merged) — covered gems and everything
 monitored/ignored are excluded. Triage buttons sit on each card in
-the **Untriaged** tab; elsewhere they move into a per-card menu. Marking a
+the **Untriaged** tab; elsewhere they move into a per-card menu. To classify a whole
+org's backlog, select rows there (`x`, or `*` for all) and press `m` / `w` / `i` —
+Maintain / Monitor / Ignore, the same mnemonics the Compliance tab uses. Marking a
 *monitored* repo notified moves it Monitored → Notified, and a **new** advisory
 appearing afterward sends it back to Monitored.
 
