@@ -782,6 +782,7 @@ async function pollCI() {
     }
   }
   const worstByRepo = new Map();
+  const repoCI = new Map(); // repo -> per-state PR tally, for the green-releases-budget check
   const fixStarted = new Set(); // one fix session per repo per pass
   for (const it of items) {
     const { r, pr, nwo } = it;
@@ -799,6 +800,11 @@ async function pollCI() {
     pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
     const w = worstByRepo.get(r.name);
     if (!w || (STATE_RANK[st.state] || 0) > (STATE_RANK[w.state] || 0)) worstByRepo.set(r.name, st);
+    // Tally per state rather than reusing worstByRepo: passing and unknown share a rank
+    // there, so "the worst is passing" can't distinguish green from no-data.
+    const tally = repoCI.get(r.name) || { failing: 0, pending: 0, passing: 0 };
+    if (st.state === "failing" || st.state === "pending" || st.state === "passing") tally[st.state] += 1;
+    repoCI.set(r.name, tally);
 
     if (
       config.autoFixCI &&
@@ -816,6 +822,16 @@ async function pollCI() {
       startFixJob(r, pr, st, failingLogs);
       fixStarted.add(r.name);
     }
+  }
+  // A repo whose PRs have ALL settled green is fixed — release its per-repo fix budget so
+  // the next, unrelated failure isn't met with an exhausted counter. Requires an actual
+  // passing PR (not merely "nothing failing" — "none"/"unknown" means no data, not success)
+  // and nothing still running, so a half-finished re-run can't bank an early reset.
+  for (const [name, tally] of repoCI) {
+    if (tally.failing || tally.pending || !tally.passing) continue;
+    if (activeFixJob(name)) continue; // a session is mid-flight — let it finish and be counted
+    const cleared = state.clearFixAttempts(name);
+    if (cleared) console.log(`  ${name}: CI green — released the fix budget (${cleared} record(s) cleared).`);
   }
   for (const [name, worst] of worstByRepo) ciStatus.set(name, { ...worst, at: Date.now() });
 }

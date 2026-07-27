@@ -570,6 +570,13 @@ forever: capped at **2 attempts per commit** (`claudeFix.maxAttemptsPerSha`) and
 CI** button (`POST /api/autofix`); start one by hand any time with **Fix CI now**
 (`POST /api/fix-ci`), which works regardless of the toggle.
 
+The per-repo cap exists to stop a fix→new-SHA→fail runaway, so **CI settling green
+releases it**: once every open PR on a repo is passing (none failing, none still
+running, at least one actually green), the poller clears that repo's attempt records.
+Otherwise the budget only ever counts down, and a repo where the fixer *worked* four
+times would be capped exactly like one where it never worked — leaving nothing for the
+next, unrelated failure. The per-commit cap still bounds any single SHA.
+
 ### EOL auto-upgrade — `autoUpgradeEOL`
 When an end-of-life runtime turns up on a **maintained** repo, the runtime-upgrade PR
 above opens **automatically** (deduped per repo + runtime + target version in
