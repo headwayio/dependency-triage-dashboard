@@ -1846,20 +1846,43 @@ function flushReviewerEdits() {
   if (!add.length && !remove.length) return;
   const r = (STATE.model.repos || []).find((x) => x.name === ed.repo);
   if (!r) return;
+  const pr = (r.openPRs || []).find((p) => p.number === ed.number);
   const chip = ed.menu.closest(".rr-dd") && ed.menu.closest(".rr-dd").querySelector(".rr-chip");
   if (chip) { chip.disabled = true; chip.textContent = "Saving…"; }
+
+  // Apply the diff locally and repaint NOW rather than waiting on the round trip. We know
+  // exactly what we're asking for, and waiting for the response left the 👀 badge showing
+  // a reviewer that had already been removed: the server answers `reviewers: null` whenever
+  // the PR isn't in its model cache, and the old code's `data.reviewers || pr.reviewers`
+  // then quietly kept the stale list until a full page reload.
+  const display = (h) => String(h).split("/").pop();
+  const before = pr ? (pr.reviewers || []).slice() : null;
+  const beforeDecision = pr ? pr.reviewDecision : null;
+  const applyLocal = (list) => {
+    if (!pr) return;
+    pr.reviewers = list;
+    // Clear the decision when nobody is left, or the next poll re-renders a review badge
+    // for a PR that no longer has a reviewer.
+    if (!pr.reviewers.length) pr.reviewDecision = null;
+    else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+    // The CI poll overwrites reviewers from a live GitHub read every 10s. GitHub's read
+    // side can still be serving the pre-edit set, which would flip the badge back moments
+    // after we fixed it — so hold the poll off this PR's reviewers briefly.
+    pr._reviewersEditedAt = Date.now();
+  };
+  const gone = new Set(remove.map(display));
+  applyLocal([...new Set([...(before || []).filter((x) => !gone.has(x)), ...add.map(display)])]);
+  scheduleRender();
+
   postJSON("/api/request-review", { repo: ed.repo, number: ed.number, add, remove })
     .then((data) => {
-      const pr = (r.openPRs || []).find((p) => p.number === ed.number);
-      if (pr) {
-        pr.reviewers = data.reviewers || pr.reviewers || [];
-        if (!pr.reviewers.length) pr.reviewDecision = null; // nobody left to review it
-        else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
-      }
-      scheduleRender();
+      // Only trust an actual array — `null` means the server couldn't confirm, and our
+      // optimistic state is the better guess.
+      if (Array.isArray(data.reviewers)) { applyLocal(data.reviewers); scheduleRender(); }
     })
     .catch((e) => {
-      scheduleRender(); // drop the optimistic ticks; the next poll re-syncs the truth
+      if (pr) { pr.reviewers = before; pr.reviewDecision = beforeDecision; } // put it back
+      scheduleRender();
       alert("Couldn't update reviewers: " + e.message);
     });
 }
@@ -2471,7 +2494,12 @@ async function pollPRStatus(refresh) {
         if (!metas || !r.openPRs) continue;
         for (const pr of r.openPRs) {
           const m = metas.find((x) => x.number === pr.number);
-          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
+          // Skip reviewers (and the decision derived from them) for a few seconds after a
+          // local edit: this comes from a live GitHub read that can still be serving the
+          // pre-edit set, which would flip the badge back right after we changed it.
+          const justEdited = pr._reviewersEditedAt && Date.now() - pr._reviewersEditedAt < 20000;
+          if (m && !justEdited) { pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; }
+          if (m) { pr.draft = m.draft; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
         }
       }
     }

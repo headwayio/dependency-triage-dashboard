@@ -1215,7 +1215,10 @@ const server = http.createServer(async (req, res) => {
           const gone = new Set(toRemove.map((h) => h.split("/").pop()));
           const next = (pr.reviewers || []).filter((x) => !gone.has(x));
           pr.reviewers = Array.from(new Set([...next, ...toAdd.map((h) => h.split("/").pop())]));
-          if (pr.reviewers.length && !pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+          // Clear the decision when the last reviewer goes, not just set it when one
+          // arrives — otherwise a stale REVIEW_REQUIRED outlives the request it described.
+          if (!pr.reviewers.length) pr.reviewDecision = null;
+          else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
           reviewers = pr.reviewers;
         }
       }

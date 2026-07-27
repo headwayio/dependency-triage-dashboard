@@ -410,6 +410,9 @@ http.createServer((req, res) => {
       // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
       // the picker renders from that response, so a canned reply would make it look broken.
       if (route === "/api/request-review") {
+        // ?nullreviewers=1 mimics the real server answering when the PR is absent from
+        // its model cache — it returns reviewers:null and the client must not regress.
+        if (u.searchParams.get("nullreviewers") === "1") return json(res, { repo: b.repo, number: Number(b.number), added: [], removed: [], reviewers: null });
         const repo = repos.find((r) => r.name === b.repo);
         const pr = repo && (repo.openPRs || []).find((p) => p.number === Number(b.number));
         const display = (h) => String(h).split("/").pop();
