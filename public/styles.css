@@ -133,6 +133,15 @@ main { padding: 16px 24px 80px; margin: 0; }
 table.pkgs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12.5px; }
 table.pkgs th, table.pkgs td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 table.pkgs th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+table.pkgs td.ver-from { color: var(--muted); white-space: nowrap; }
+table.pkgs td.ver-to { white-space: nowrap; }
+/* Already-satisfied advisory rows (installed ≥ patched floor): dimmed, no action needed. */
+table.pkgs tr.pkg-satisfied td { opacity: 0.5; }
+.pkgs .bump { font-size: 11px; padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+.pkgs .bump.major { color: var(--danger); font-weight: 700; }
+.pkgs .bump.minor { color: var(--medium); font-weight: 600; }
+.pkgs .bump.patch { color: var(--muted); }
+.pkgs .bump.req { background: rgba(179, 38, 30, 0.16); }
 .sev-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
 .sev-dot.critical { background: var(--critical); }
 .sev-dot.high { background: var(--high); }
@@ -149,6 +158,7 @@ table.pkgs th { color: var(--muted); font-weight: 600; font-size: 11px; text-tra
   font-size: 12px;
   max-height: 320px;
   overflow: auto;
+  overflow-anchor: none; /* don't let streaming output nudge the page's scroll position */
   white-space: pre-wrap;
   word-break: break-word;
   display: none;
@@ -158,6 +168,10 @@ table.pkgs th { color: var(--muted); font-weight: 600; font-size: 11px; text-tra
 .runlog .line.err { color: var(--critical); }
 .runlog .line.step { color: var(--accent); font-weight: 600; margin-top: 4px; }
 .runlog .line.success { color: var(--ok); font-weight: 600; }
+/* Inline markdown rendered by mdInline(): tint code so it reads as code in the mono log,
+   and brighten bold so **emphasis** stands out against the dimmer body text. */
+.runlog .line code { background: rgba(110, 140, 200, 0.16); padding: 0 4px; border-radius: 3px; }
+.runlog .line strong { color: var(--text); font-weight: 600; }
 .runlog .pr-link { display: inline-block; margin-top: 6px; }
 
 .empty, .loading { text-align: center; color: var(--muted); padding: 60px 20px; }
@@ -239,6 +253,8 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 /* End-of-life runtime upgrade button */
 .eol-upgrade-btn { margin-left: auto; font-size: 12px; padding: 3px 11px; border-radius: 6px; background: var(--danger); border-color: var(--danger); color: #fff; }
 .eol-upgrade-btn:hover { background: var(--danger); filter: brightness(1.1); }
+.eol-pr-link { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+.eol-pr-link:hover { text-decoration: underline; }
 
 /* Gem disposition action buttons (covered → dismiss, blocked → bump). Both render
    with the .primary class, which out-specifies a single class — so they're accent
@@ -259,6 +275,9 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
 .rev-state.requested { color: var(--accent); background: var(--accent-bg); border-color: var(--accent-border); }
 .rev-state.approved { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
 .rev-state.changes { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
+.rev-state.stacked, .rev-state.sequenced { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
+/* "recommended" chip inside a consolidation button */
+.rec-chip { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: rgba(255,255,255,0.22); color: inherit; vertical-align: middle; }
 
 /* Branch protection: apply button (amber) */
 .protect-btn { margin-left: auto; font-size: 12px; padding: 3px 11px; border-radius: 6px; background: var(--medium, #b3801f); border-color: var(--medium, #b3801f); color: #1a1a1a; font-weight: 600; white-space: nowrap; }
@@ -457,6 +476,13 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .ar-status { display: flex; flex-direction: column; margin-top: 2px; }
 .ar-status:empty { display: none; }
 
+/* Inline detail tables under their amber summary ticks (Blocked + Major-required).
+   Aligned to the row text via a small left indent; the reason column wraps, rest don't. */
+.blocked-table, .major-table { margin: 4px 0 8px 13px; width: calc(100% - 13px); font-size: 12px; }
+.blocked-table td.blk-why { color: var(--muted); white-space: normal; }
+.blocked-table td.ver-to { color: var(--medium); font-weight: 600; }
+.major-table td.ver-to { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
 /* Status rows: label left, action right; a thin colored tick on the row's left edge
    encodes its kind (amber = needs a decision, red = urgent, blue = PR/info, green = ok)
    — replaces the old labeled zone boxes without losing the color coding. */
@@ -471,6 +497,9 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .srow.pr, .srow.info, .srow.todo { --rowbar: var(--accent); }
 .srow.ok { --rowbar: var(--ok); }
 .srow .lab { display: inline-flex; gap: 6px; align-items: baseline; min-width: 0; }
+/* Long paragraph labels (with inline <code>) need normal flow, not flex items. */
+.srow .lab.flow { display: block; }
+.srow .lab.flow code { white-space: nowrap; }
 .srow .lab.warn { color: var(--medium); }
 .srow .lab.danger { color: var(--danger); }
 .srow .lab.ok { color: var(--ok); }
@@ -482,6 +511,7 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .srow .lab a { color: inherit; }
 .srow .lab a:hover { text-decoration: underline; }
 .srow .srow-arrow { color: var(--muted); }
+.srow .pr-title { color: var(--muted); font-weight: 400; }
 .srow .srow-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .srow button { font-size: 12px; padding: 3px 11px; white-space: nowrap; }
 .srow .ci-fix-btn, .srow .ci-fixing, .srow .ci-capped { white-space: nowrap; }
@@ -514,6 +544,11 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
 .toast.out { opacity: 0; transition: opacity 0.3s ease; }
 @keyframes toastin { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .copy-btn { white-space: nowrap; font-size: 13px; }
+/* Per-PR review actions (request review / draft→ready) in the row's right slot. Neutral
+   like Copy — green is reserved for the "checks passing" status, so an action button must
+   not wear it (a green ✓ pill reads as "this PR IS ready", not "click to mark it ready"). */
+.pr-act { white-space: nowrap; font-size: 12px; padding: 3px 10px; border-radius: 6px; }
+.pr-act:disabled { opacity: 0.6; }
 .pending-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .pending-toolbar:empty { display: none; } /* no bulk button (e.g. <2 repos) → don't reserve space */
 .copy-all, .open-all { font-weight: 600; }
@@ -600,3 +635,56 @@ button.subtle { color: var(--muted); }
 .contact-form .contact-input { font-size: 13px; }
 .contact-form .cname { width: 150px; }
 .contact-form .cemail { width: 210px; }
+
+/* ---- Review console (per-PR overlay) ------------------------------------ */
+.review-modal { max-width: 940px; width: calc(100% - 48px); max-height: 86vh; padding: 18px 20px; display: flex; flex-direction: column; }
+.rv-titlebar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.rv-titlebar .modal-title { margin: 0; flex: 1; min-width: 0; }
+.rv-titleacts { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+.rv-subhead { font-size: 12px; color: var(--muted); margin: 4px 0 12px; display: flex; align-items: center; gap: 10px; }
+.rv-subhead button { padding: 3px 9px; font-size: 12px; }
+.rv-threads { overflow-y: auto; flex: 1 1 auto; min-height: 80px; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.rv-loading, .rv-empty { color: var(--muted); font-size: 13.5px; padding: 18px 4px; display: flex; align-items: center; gap: 8px; }
+.rv-thread { display: flex; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); }
+.rv-thread.skipped { opacity: 0.5; }
+.rv-thread.cursor { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.rv-hint { font-size: 11px; color: var(--muted); margin: 8px 2px 0; }
+.rv-hint kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; color: var(--text); }
+.rv-skip { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; user-select: none; cursor: pointer; }
+.rv-main { flex: 1; min-width: 0; }
+.rv-head { font-size: 12.5px; color: var(--text); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.rv-head code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 11.5px; color: var(--muted); }
+.rv-verdict { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); }
+.rv-verdict.fix { color: var(--ok); background: var(--ok-bg, rgba(63,185,80,0.12)); }
+.rv-verdict.skip { color: var(--high, #d29922); background: rgba(210,153,34,0.12); }
+.rv-verdict.pending { color: var(--muted); }
+.rv-reason { font-size: 12px; color: var(--muted); font-style: italic; margin: 3px 0 0; }
+.rv-body { font-size: 13px; color: var(--text); line-height: 1.5; margin: 5px 0 0; white-space: pre-wrap; word-break: break-word; }
+.rv-body code { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+.rv-diff { margin: 7px 0 0; padding: 7px 9px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; line-height: 1.45; color: var(--muted); overflow-x: auto; max-height: 140px; white-space: pre; }
+.review-log { margin-top: 12px; max-height: 220px; }
+.review-log:not(.show) { display: none; }
+.rv-actions { margin-top: 14px; }
+
+/* ---- Session-log history viewer ----------------------------------------- */
+.sessions-modal { max-width: 900px; width: calc(100% - 48px); max-height: 86vh; padding: 18px 20px; display: flex; flex-direction: column; }
+.sessions-list { overflow-y: auto; flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.sess { border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.sess > summary { cursor: pointer; padding: 9px 12px; font-size: 12.5px; color: var(--text); list-style: none; }
+.sess > summary::-webkit-details-marker { display: none; }
+.sess > summary::before { content: "▸ "; color: var(--muted); }
+.sess[open] > summary::before { content: "▾ "; }
+.sess-log { margin: 0 10px 10px; max-height: 320px; }
+
+/* ---- Consolidation order modal (drag to reorder) ------------------------ */
+.ord-modal { max-width: 640px; padding: 18px 20px; }
+.ord-intro { font-size: 13px; color: var(--muted); line-height: 1.5; margin: 0 0 8px; }
+.ord-meta { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
+.ord-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 52vh; overflow-y: auto; }
+.ord-row { display: flex; align-items: center; gap: 9px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: grab; user-select: none; }
+.ord-row:active { cursor: grabbing; }
+.ord-row.dragging { opacity: 0.5; border-color: var(--accent); }
+.ord-grip { color: var(--muted); font-size: 14px; line-height: 1; flex: none; }
+.ord-pos { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 14px; text-align: right; font-size: 12px; flex: none; }
+.ord-pr { color: var(--accent); font-weight: 600; font-size: 13px; white-space: nowrap; flex: none; }
+.ord-title { flex: 1; min-width: 0; color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

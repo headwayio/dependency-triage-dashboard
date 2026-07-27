@@ -15,6 +15,7 @@ compliance.json
 classifications.json
 ignored.json
 dispositions.json
+blocked.json
 dismissals.json
 bump-attempts.json
 upgrade-attempts.json
@@ -23,6 +24,8 @@ notifications.json
 scope-overrides.json
 engagement-log.json
 dependabot-nudges.json
+session-history.json
+pr-links.json
 
 # Per-user editor/agent config (also covered by many users' global ignores)
 .claude/

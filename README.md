@@ -52,8 +52,19 @@ every trigger and the shared pipeline is in
 
 This tool acts on **Dependabot security alerts** — the advisory feed
 (`/dependabot/alerts`, backed by GHSA/CVE entries). A package enters the dashboard
-**only if it has an open security advisory**; the model is built entirely from that
-feed, across every severity (critical → low — there's no severity floor).
+**only if it has an open security advisory**; the model is built (almost) entirely from
+that feed, across every severity (critical → low — there's no severity floor).
+
+> **The one exception: Hex (Elixir).** GitHub's dependency graph doesn't parse
+> `mix.lock`, so Dependabot never scans Hex — a repo's "0 hex alerts" means
+> *unscanned, not clean* (its SBOM shows zero hex packages even for a large Elixir
+> app). Because the alert feed is blind here, the tool scans Hex **itself**: it reads
+> each repo's committed `mix.lock` and cross-references the installed versions against
+> GitHub's Advisory Database under the `ERLANG` ecosystem — the same advisory data
+> Dependabot uses, just never auto-matched against `mix.lock`. The synthesized
+> advisories are merged into the model in the **same shape** as Dependabot alerts, so
+> Hex repos flow through the identical triage/tabs/update-PR machinery. See
+> [Hex / Elixir scanning](#hex--elixir-scanning). Turn it off with `"hexScan": false`.
 
 It deliberately does **not** touch Dependabot's other feature, **scheduled version
 updates** — the `dependabot/*` "Bump X from A to B" PRs your `.github/dependabot.yml`
@@ -82,7 +93,8 @@ merges a version-update PR.
   else needs it.
 - For the update PRs to actually change files, the relevant toolchain must be on
   your PATH: `npm`/`pnpm` for JS, `bundle` (or `mise`) for Ruby, `composer`,
-  `go`. Missing tools are skipped with a note in the run log — nothing breaks.
+  `go`, and `mix` (Elixir + Erlang, via `mise`) for Hex. Missing tools are skipped
+  with a note in the run log — nothing breaks.
 
 ## Credentials & local setup
 
@@ -221,16 +233,22 @@ and which actions it gets. Classification is purely local triage: unlike
 | --- | --- |
 | **Untriaged** | Not yet classified — the triage inbox. Hidden when empty. |
 | **Maintained** | Active client / we host — repos we actually patch. |
-| **Pending PR** | Has an open tool-opened PR awaiting merge. Takes precedence over every other tab, whatever the classification. |
+| **Pending PR** | Has an open tool-opened PR whose CI is still running, failing, or being fixed. Takes precedence over every other tab, whatever the classification. |
+| **Passing PR** | Has an open tool-opened PR with **green CI** but no approval yet — awaiting review. Hidden when empty. |
+| **Approved PR** | Has an open tool-opened PR that's **approved** — ready to merge. Hidden when empty. |
 | **Covered** | A maintained **gem** whose constraints already permit every patch — no action needed. Hidden when empty. |
 | **Monitored** | Inactive client we watch but don't patch — we notify them instead. |
 | **Notified** | A monitored repo whose client we've emailed, with no new advisories since. |
 | **Ignored** | Out of scope for this tool. |
 | **🛡 Compliance** | A *separate* full-org inventory — **every** non-archived repo, not just alerted ones — for the SOC 2 scope decision + branch protection. See [below](#branch-protection--the-compliance-inventory). |
 
-Archived repos drop out of GitHub's alert feed entirely, so there's no archived
-tab. The headline **"to maintain"** count is Maintained + Pending — covered gems
-and everything monitored/ignored are excluded. Triage buttons sit on each card in
+An open tool PR flows through three lifecycle tabs as it progresses —
+**Pending PR** (CI running/failing) → **Passing PR** (green CI, awaiting review) →
+**Approved PR** (ready to merge) — so the worklist is sorted by how close each PR is
+to merging. Archived repos drop out of GitHub's alert feed entirely, so there's no
+archived tab. The headline **"to maintain"** count is Maintained + Pending + Passing
++ Approved (open PRs still count as work until merged) — covered gems and everything
+monitored/ignored are excluded. Triage buttons sit on each card in
 the **Untriaged** tab; elsewhere they move into a per-card menu. Marking a
 *monitored* repo notified moves it Monitored → Notified, and a **new** advisory
 appearing afterward sends it back to Monitored.
@@ -267,6 +285,12 @@ auth.
    - **yarn** → Yarn Berry (≥2): `yarn up <pkgs> --mode=update-lockfile`. Yarn
      classic (1.x): noted for manual handling (use `resolutions` / upgrade the
      parent), since transitive dev-deps can't be safely lockfile-bumped in 1.x.
+   - **Hex (Elixir)** → `mix deps.update <pkgs>`, run under the repo's pinned
+     **Elixir + Erlang** (from `.tool-versions`/`.mise.toml`/`mix.exs`). The targeted
+     packages come from the tool's own Hex scan, not Dependabot — see
+     [Hex / Elixir scanning](#hex--elixir-scanning). A package a `mix.exs` constraint
+     caps below its patched floor is reported in the **Blocked** table for a manual
+     constraint bump (the Elixir analog of the gem/parent-constraint case).
 4. If nothing changed, it stops and tells you (no empty PR). On this no-change
    path it also **auto-closes any obsolete PR** the tool previously opened for the
    repo — a re-check that produces no diff means the flagged advisories are already
@@ -282,10 +306,27 @@ auth.
    (github-actions, git-sha pins) are left alone. Dependabot then self-closes the
    superseded ones. Deduped to once per PR per day. Disable with
    `"nudgeDependabotOnClear": false`.
-5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`
+5. Otherwise commit → `git push --force-with-lease` → `gh pr create --draft`. The branch is
+   date-stamped, so a same-day re-run refreshes the existing PR. Across days, if a prior
+   update PR is still open: when today's freshly-built tree is **identical** to it, nothing
+   is opened (it's left as-is); when it **differs**, the new PR is opened and the prior one is
+   **superseded** — closed with a "Superseded by #N" comment — so the repo never accumulates
+   duplicate update PRs. (Also gated by `"closeObsoletePRs": false`.)
 
-The PR body lists every advisory it targeted and reminds reviewers to let CI run
-before merging. The branch is per-day; a same-day re-run refreshes it.
+**Minimize major bumps.** Security fixes that exist **within the installed major**
+are applied automatically. An advisory whose only fix is in a **higher major**
+(no same-major backport — e.g. `devise 4.9.4 → 5.0.4`, where GitHub's affected
+range covers all of 4.x) is **held back**: it's excluded from this lockfile-only PR
+and listed in the PR body under *"Major upgrades required — not included here"* so
+you can opt in deliberately. This determination uses GitHub's range-specific
+`first_patched_version` (the floor for *your* version): if its major is higher than
+installed, the current major has no fix. Disable with `"minimizeMajorBumps": false`.
+
+The PR body lists every advisory it targeted — with **From / To / Bump** columns
+(major/minor bolded so you can eyeball breaking-risk vs patch) — and reminds
+reviewers to let CI run before merging. The same From/To/Bump detail (and a red
+**major ⚠** flag on forced majors) shows on each repo card's flagged-packages table
+in the dashboard. The branch is per-day; a same-day re-run refreshes it.
 
 **npm-ecosystem overrides fallback.** Most npm/pnpm/yarn advisories are on
 *transitive* dependencies a targeted `update` can't move (a parent's version range
@@ -295,6 +336,38 @@ that happens, the tool writes `overrides` (npm) / `pnpm.overrides` (pnpm) /
 regenerates the lockfile — reaching transitive deps a normal update can't. A forced
 bump can break a dependent, so it opens as a **draft** for CI (and the auto-fix loop)
 to validate.
+
+### Hex / Elixir scanning
+Every other ecosystem rides GitHub's Dependabot **alert feed**. Hex can't: GitHub's
+dependency graph **doesn't parse `mix.lock`**, so Dependabot never scans Elixir — a
+repo's "0 hex alerts" means *unscanned, not clean* (its SBOM lists **zero** hex
+packages even for a large Elixir app). We confirmed there's no toggle for this: the
+[supported-ecosystems table](https://docs.github.com/en/code-security/dependabot/ecosystems-supported-by-dependabot/supported-ecosystems-and-repositories)
+lists Hex (`mix`) as **version-updates ✓ but security-updates ✗**, and pushing a
+`mix.lock` snapshot through the **Dependency Submission API** populates the SBOM yet
+still produces **no alerts** (tested: 79 hex packages ingested, 0 alerts after 10 min).
+
+So the tool closes the blind spot itself (`lib/hex.js`):
+
+1. **Scan.** For each candidate repo it reads the committed `mix.lock`, then matches
+   the installed versions against GitHub's Advisory Database under the **`ERLANG`**
+   ecosystem (pulled once via GraphQL, cached 6h) — the same advisory data Dependabot
+   would use, just never auto-matched against `mix.lock`. Each hit is synthesized into
+   the **same alert shape** as a Dependabot alert (severity, patched floor, GHSA, …),
+   so Hex repos appear in the dashboard and flow through triage/tabs/PRs unchanged.
+2. **Which repos.** Every repo whose **primary language is Elixir**, plus any repo
+   already surfaced by the Dependabot feed (so a polyglot app — JS frontend + Elixir
+   backend — is scanned too). A polyglot repo that is *neither* Elixir-primary *nor*
+   otherwise alerted won't be caught automatically; add it to `includeRepos`.
+3. **Remediate.** **Create update PR** runs `mix deps.update <pkgs>` (see above). A
+   patch held below its floor by a `mix.exs` constraint lands in the PR's **Blocked**
+   table; an advisory whose only fix is a **higher major** (e.g. `decimal 2 → 3`, which
+   needs coordinated bumps of its dependents) is held back under `minimizeMajorBumps`
+   and listed for manual opt-in.
+
+Disable the whole thing with `"hexScan": false`. The advisory query and every
+`mix.lock` read are best-effort — a failure degrades to "no hex advisories", never
+breaks a Refresh.
 
 ### Open update PRs for all (background jobs)
 **⚡ Open update PRs for all N** (atop the Untriaged and Maintained tabs) starts a
@@ -371,17 +444,106 @@ auto-fills the greeting and recipient.
 appears later, the card flips to *"N new advisories since you notified — re-notify
 recommended"* and the repo returns to **Monitored**.
 
+## Finishing open PRs — consolidate, rebase, review
+
+Once a repo has open tool PRs, a few actions help drive them to merge. They appear on the
+Pending / Passing / Approved tabs.
+
+### Consolidate colliding PRs — Rollup / Stack / Sequence
+
+When **≥2** of a repo's open tool PRs branched off the same base **and** change the same
+lockfile (`package-lock.json`, `Gemfile.lock`, …), they can't all merge cleanly — the second
+to merge invalidates the first's lockfile. The dashboard detects that cluster (server-side,
+authoritative) and offers three ways out on the card banner; you pick per repo:
+
+- **⬆ Roll up → 1 PR** — a high-effort headless session merges every branch onto a fresh
+  `release/deps-<date>` branch, regenerates the lockfile **once** so all upgrades coexist,
+  opens a single PR to review & squash-merge, and **closes the originals** in its favor.
+  Fewest PRs; review the whole batch together. (`lib/rollup.js`, `/api/rollup`.)
+- **🥞 Stack → N ordered PRs** — a session merges each PR onto the one below it (regenerating
+  the lockfile each time), pushes the rewritten branches, then **retargets each PR's base** to
+  the branch below so its diff shows only its own delta. Merge bottom-up; GitHub retargets
+  each to the base as its parent lands. Keeps every PR independently reviewable.
+- **⏱ Sequence → merge in order** — no code changes now: records a blocked-by ordering and
+  comments it on each PR. When a blocker merges, the dashboard **auto-rebases** the next PR
+  (merge base + regenerate the lockfile) on the next poll. Lightest touch; resolves the clash
+  lazily at merge time. (Stack/sequence live in `lib/consolidate.js`, `/api/consolidate`; the
+  ordering is persisted in `pr-links.json` and the auto-rebase runs in `pollSequenceLinks`.)
+
+Stacked / sequenced PRs carry a **🥞 stacked on #N** / **⏱ after #N** badge, and the banner
+stops offering to consolidate PRs that are already linked — so it's clear which way a clash
+was resolved and you can't double-apply it.
+
+### ⟳ Rebase / Update branch (per PR)
+
+A PR that's **behind** its base or **conflicting** shows a Rebase button. It launches a
+headless session that merges the base in, regenerates the lockfile, resolves conflicts, and
+pushes — CI then re-runs. (`createRebasePR` in `lib/rollup.js`, `/api/rebase`.)
+
+### 💬 Review console (Copilot + reviewer comments)
+
+A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
+console (`lib/reviews.js`). It lists every thread (Copilot 🤖 / human 👤 with file:line + diff
+context), auto-triages the **Copilot** ones with an advisory *fix / skip* suggestion, and lets
+you **skip** any. Hitting **Address** runs one headless session that, per comment, either makes
+the smallest reasonable fix **or rejects it** (when the comment is wrong / out of scope) —
+then pushes and **replies to + resolves each thread** with a tailored note (the fix's commit,
+or the reason it was rejected). Skipped comments stay open. Keyboard: `j`/`k` move, `x` skip,
+`a` address, `h`/`l` prev/next PR, `o` open, `esc` close.
+
+### 🗒 Session log
+
+Every headless session's output is archived per repo (`session-history.json`) and viewable
+after the fact from the card's **⋯ → 🗒 Session log** menu (newest first, each expandable).
+Retention is PR-aware: a session tied to a PR is kept **until that PR merges/closes**, then
+pruned on the next Refresh.
+
+## How the headless Claude sessions are seeded
+
+Several actions launch a **headless `claude -p` session** in a local clone to do work a
+script can't — fixing failing CI, unblocking constraint-capped patches, major upgrades,
+release rollups, rebasing a stale branch, and addressing PR review comments. Every one of
+these routes through `runClaude` in `lib/fixer.js`, which injects a **shared system prompt**
+(`SESSION_PREAMBLE`, via the CLI's `--append-system-prompt`) so each session has consistent
+context about where it's running and how to behave. The preamble tells the session:
+
+- It's running **fully autonomously** — a headless `claude -p` with no human in the loop
+  mid-run — **inside this Dependency Dashboard**, which triages Dependabot alerts across the
+  org and launched it to carry out one specific remediation.
+- It's in a **fresh local clone of one repo** on a branch the dashboard already checked out;
+  stay in that repo.
+- **Non-interactive**: never ask questions or wait for confirmation (nobody can answer) —
+  decide from the evidence and proceed.
+- A human **watches the output stream live** in the card/console log, so narrate briefly.
+- Use the repo's **pinned toolchain through mise** (`mise exec -- …`) so versions match CI;
+  regenerate lockfiles with the package manager rather than editing them by hand.
+- Keep the change **minimal and scoped**; never stage tracker/state files (`.beads/`,
+  `.DS_Store`, editor configs).
+- **Defer to the task prompt** for what to commit and whether to push / open a PR — unless it
+  says otherwise, the dashboard handles pushing, opening PRs, and replying to review threads.
+
+That last point is why the shared preamble carries **no task-specific git directives**: those
+differ per action (the CI-fix session pushes its own branch; rollup/rebase/review let the
+dashboard push) and live in each action's own prompt. Reasoning effort, model, and timeout
+are per-session knobs (`claudeFix` / `claudeUnblock` / `claudeMajor` / `claudeRollup` /
+`claudeReview` config blocks); the breaking-change sessions default to max effort.
+
+The one exception is the **Copilot comment triage** (the advisory "fix / skip" suggestions in
+the review console): that's a quick, read-only, no-clone one-shot, so it carries its own
+focused prompt rather than the code-editing preamble.
+
 ## Autonomous loops
 
 ![The Pending PR tab: each open update PR with its review state and live CI
 checks — a draft with failing checks offers a one-click Fix CI that launches a
 headless Claude session, next to an approved PR with checks passing](docs/pending-tab.png)
 
-*The Pending PR tab — where opened PRs live until merge. Each card shows the
-PR's review state and live CI checks: the failing one offers **🔧 Fix CI**
-(the headless Claude loop below), the approved one is ready to merge. Bulk
-actions copy every PR link for Slack or open them all in the browser. Shown
-with demo data.*
+*The Pending PR tab — where opened PRs live while CI runs or they're being fixed.
+Each card shows the PR's review state and live CI checks: the failing one offers
+**🔧 Fix CI** (the headless Claude loop below). As a PR progresses it advances to the
+**Passing PR** tab (green CI, awaiting review) and then **Approved PR** (the
+merge-ready worklist). All three PR tabs carry the same bulk actions to copy every PR
+link for Slack or open them all in the browser. Shown with demo data.*
 
 Three loops can run **unattended**. All ship **off in code** and are turned on by your
 `config.json`; each is independent, capped, and safe to flip off (two have
@@ -471,12 +633,15 @@ git-ignored, so your settings stay local):
 | `draftPRs` | `true` | open every PR (update, upgrade, bump) as a draft |
 | `closeObsoletePRs` | `true` | on a no-change re-check, auto-close the tool's now-obsolete update PR for that repo (comment + delete branch); scoped to `branchPrefix` branches |
 | `nudgeDependabotOnClear` | `true` | on a no-change re-check, comment `@dependabot recreate` on the repo's open `dependabot/*` PRs **already satisfied on the default branch** so Dependabot self-closes them (deduped once/PR/day); still-needed/unverifiable PRs are left alone |
+| `minimizeMajorBumps` | `true` | apply only same-major security fixes automatically; hold back advisories whose only fix is a higher major (listed in the PR body for manual opt-in) |
+| `hexScan` | `true` | scan Hex (Elixir) repos against GitHub's `ERLANG` advisory DB (the Dependabot feed omits `mix.lock`) and merge the results into the model — see [Hex / Elixir scanning](#hex--elixir-scanning) |
 | `includeRepos` | `[]` | allowlist (empty = all repos with open alerts) |
 | `excludeRepos` | `[]` | repos to skip |
 | `branchPrefix` | `dependency-updates/soc2` | update-branch name prefix |
 | `npm.force` | `false` | add `--force` to `npm audit fix` (allows major bumps) |
 | `autoInstallRuby` | `true` | when a repo's pinned Ruby is missing, `mise install` it (slow; compiles Ruby). Set `false` to skip with instructions instead |
 | `autoInstallNode` / `autoInstallGo` / `autoInstallPhp` | `true` | same, for the pinned Node / Go / PHP toolchain |
+| `autoInstallElixir` | `true` | when a Hex update runs, `mise install` the repo's pinned Erlang + Elixir if missing. Set `false` to skip (the update no-ops without a toolchain) |
 | `maxConcurrentUpdates` | `3` | update/upgrade/bump jobs run at once (env `MAX_CONCURRENT_UPDATES` overrides) |
 | `maxConcurrentFixes` | `1` | CI-fix jobs run at once (a pool separate from updates) |
 | `autoFixCI` | `false` | auto-launch a headless Claude fix when a pending PR's CI fails |
