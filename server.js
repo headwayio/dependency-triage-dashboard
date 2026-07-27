@@ -229,12 +229,16 @@ async function enrichCompliance(orgRepos, force) {
     const dependents = {};
     for (const r of work) for (const dep of r.dependsOnOrg || []) (dependents[dep] = dependents[dep] || []).push(r.name);
     const out = {};
+    const now = Date.now();
     for (const r of work) {
       out[r.name] = {
         isGem: r.isGem,
         published: r.published,
         dependsOnOrg: r.dependsOnOrg,
-        dependabot: dependabot.assess(r.gitDeps, access, (n) => visByName.get(n)),
+        dependabot: dependabot.verdict(
+          dependabot.assess(r.gitDeps, access, (n) => visByName.get(n)),
+          dependabot.staleEcosystems(r.dependabotConfig, r.dependabotRuns, now)
+        ),
       };
     }
     for (const name of Object.keys(dependents)) {
@@ -1644,7 +1648,10 @@ const server = http.createServer(async (req, res) => {
         outScope: by((x) => x.scope === "out"),
         overridden: by((x) => x.scopeOverride),
         unprotected: by((x) => x.protectionScope && x.protected === false),
+        // Two different silences, counted together for the banner: an unreachable git dep,
+        // or a configured ecosystem that simply stopped running.
         dependabotBlocked: by((x) => x.dependabot && x.dependabot.state === "blocked"),
+        dependabotStale: by((x) => x.dependabot && x.dependabot.state === "stale"),
       };
       const archived = archivedRepos.map((r) => ({ name: r.name, url: r.url, pushedAt: r.pushedAt, visibility: r.visibility }));
       return sendJSON(res, 200, { repos, summary, archived, protectionPending, enrichPending });

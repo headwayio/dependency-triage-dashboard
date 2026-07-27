@@ -301,7 +301,7 @@ const compRepo = (name, opts = {}) => ({
   protectionScope: !!opts.protectionScope, protected: "protected" in opts ? opts.protected : null,
   isGem: !!opts.isGem, published: opts.published || null, dependents: opts.dependents || [],
   engagement: opts.engagement || null,
-  dependabot: opts.dependabot || { state: "ok", blockedBy: [] },
+  dependabot: opts.dependabot || { state: "ok", blockedBy: [], stale: [] },
 });
 
 const complianceRepos = [
@@ -312,7 +312,10 @@ const complianceRepos = [
   compRepo("data-pipeline", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(3), dependabot: { state: "blocked", blockedBy: ["acme-private-gem"] } }),
   compRepo("internal-tools-gem", { scope: "out", scopeDerived: "in", scopeOverride: { scope: "out", reason: "Internal gem — outside the customer boundary.", at: days(20) }, classification: "maintained", isGem: true, published: { registry: "rubygems" }, dependents: ["acme-rails-app"], pushedAt: days(21) }),
   compRepo("client-site-alpha", { classification: "monitored", pushedAt: days(200), engagement: { at: days(90), kind: "engagement", from: "maintained", to: "monitored", note: "SOW ended; client self-manages.", sowEndDate: "2026-03-15" } }),
-  compRepo("client-site-beta", { classification: "monitored", pushedAt: days(310) }),
+  compRepo("client-site-beta", { classification: "monitored", pushedAt: days(310), dependabot: { state: "stale", blockedBy: [], stale: [
+    { ecosystem: "mix", label: "hex", interval: "weekly", lastRunAt: days(105), ageDays: 105, staleAfterDays: 15 },
+    { ecosystem: "npm", label: "npm_and_yarn", interval: "weekly", lastRunAt: null, ageDays: null, staleAfterDays: 15 },
+  ] } }),
   compRepo("client-site-gamma", { classification: "monitored", pushedAt: days(280) }),
   compRepo("old-experiment", { classification: "ignored", pushedAt: days(800) }),
   compRepo("dormant-marketing-site", { classification: "ignored", pushedAt: days(900) }),
@@ -330,6 +333,7 @@ const compliance = {
     overridden: complianceRepos.filter((r) => r.scopeOverride).length,
     unprotected: complianceRepos.filter((r) => r.protectionScope && r.protected === false).length,
     dependabotBlocked: complianceRepos.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
+    dependabotStale: complianceRepos.filter((r) => r.dependabot && r.dependabot.state === "stale").length,
   },
   archived: [
     { name: "retired-app-2019", url: "https://github.com/acme-corp/retired-app-2019", pushedAt: days(1500), visibility: "PRIVATE" },

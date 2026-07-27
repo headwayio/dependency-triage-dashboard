@@ -688,7 +688,7 @@ function drawCompliance() {
     in: (r) => r.scope === "in",
     out: (r) => r.scope === "out",
     overridden: (r) => !!r.scopeOverride,
-    blocked: (r) => r.dependabot && r.dependabot.state === "blocked",
+    blocked: (r) => r.dependabot && (r.dependabot.state === "blocked" || r.dependabot.state === "stale"),
     all: () => true,
   };
   // Coerce any stale stored filter (e.g. the old "undecided"/"needs") to a valid one.
@@ -715,12 +715,19 @@ function drawCompliance() {
     ["overridden", "Overridden", s.overridden],
     // Exception state — shown only when it's non-zero, unlike the standing buckets above.
     // A permanent "Dependabot blocked 0" would read as noise; its appearing at all is the alarm.
-    ...(s.dependabotBlocked ? [["blocked", "⚠ Dependabot blocked", s.dependabotBlocked]] : []),
+    ...(s.dependabotBlocked + (s.dependabotStale || 0)
+      ? [["blocked", "⚠ Dependabot silent", s.dependabotBlocked + (s.dependabotStale || 0)]]
+      : []),
     ["all", "All", s.total],
     ["archived", "Archived", (d.archived || []).length],
   ];
   // Every repo a blocked repo is waiting on — the exact set to grant Dependabot access to.
   const blockers = [...new Set(d.repos.flatMap((r) => (r.dependabot && r.dependabot.blockedBy) || []))].sort();
+  // Ecosystems that have simply stopped running, worst (longest quiet) first.
+  const staleRows = d.repos
+    .filter((r) => r.dependabot && r.dependabot.state === "stale")
+    .flatMap((r) => (r.dependabot.stale || []).map((s2) => ({ repo: r.name, ...s2 })))
+    .sort((a, b) => (b.ageDays == null ? 1e9 : b.ageDays) - (a.ageDays == null ? 1e9 : a.ageDays));
 
   // Sortable column headers: click to sort, click again to flip direction.
   const arrow = (key) => (STATE.compSort.key === key ? ` <span class="sort-arrow">${STATE.compSort.dir === 1 ? "▲" : "▼"}</span>` : "");
@@ -760,6 +767,26 @@ function drawCompliance() {
             `It can't clone ${blockers.map((b) => `<code>${esc(b)}</code>`).join(", ")}, so dependency resolution fails and <em>every</em> update there is skipped — security ones included. ` +
             `Their alert counts are not trustworthy. Fix: grant Dependabot read access to ${blockers.length === 1 ? "that repo" : "those repos"} ` +
             `(org Settings → Code security → Dependabot private repository access). ` +
+            `<button class="comp-warn-link" data-filter="blocked">Show the affected repos</button></div>`
+          : "") +
+        // Separate banner from the blocked one: same symptom (no updates), different cause
+        // and different fix, so merging them would muddle both.
+        (staleRows.length
+          ? `<div class="comp-warn stale">⏱ <strong>${staleRows.length} configured ecosystem${staleRows.length === 1 ? " has" : "s have"} stopped running.</strong> ` +
+            `Dependabot is scheduled for ${staleRows.length === 1 ? "it" : "them"} but hasn't produced a version-update job in a while — no error, just silence. ` +
+            `Common causes: <code>open-pull-requests-limit</code> reached (merge or close the open ones), or GitHub pausing the schedule. ` +
+            `<div class="stale-list">` +
+            staleRows
+              .slice(0, 6)
+              .map(
+                (x) =>
+                  `<span><code>${esc(x.repo)}</code> · ${esc(x.ecosystem)} · ` +
+                  (x.ageDays == null ? "never run" : `last ran ${x.ageDays}d ago`) +
+                  ` <span class="muted">(${esc(x.interval)}, flagged past ${x.staleAfterDays}d)</span></span>`
+              )
+              .join("") +
+            (staleRows.length > 6 ? `<span class="muted">…and ${staleRows.length - 6} more</span>` : "") +
+            `</div>` +
             `<button class="comp-warn-link" data-filter="blocked">Show the affected repos</button></div>`
           : "")) +
     `<div class="comp-selbar"${STATE.compSelected.size ? "" : " hidden"}>${STATE.compSelected.size ? selBarHtml() : ""}</div>` +
@@ -1609,10 +1636,16 @@ function complianceRow(r, idx) {
   if (r.published && r.published.registry === "rubygems") typeBadge = ` <span class="gem-tag pub" title="Published gem on rubygems.org">💎 rubygems</span>`;
   else if (r.published && r.published.registry === "npm") typeBadge = ` <span class="gem-tag pub" title="Published package on npm">📦 npm</span>`;
   else if (r.isGem) typeBadge = ` <span class="gem-tag" title="Has a .gemspec but isn't published to rubygems">💎 gem · unpublished</span>`;
-  // Dependabot can't resolve this repo at all — so its "0 alerts" means unscanned, not clean.
-  const db = r.dependabot && r.dependabot.state === "blocked"
-    ? ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`
-    : "";
+  // Dependabot isn't producing updates here — so "0 alerts" may mean unscanned, not clean.
+  let db = "";
+  if (r.dependabot && r.dependabot.state === "blocked") {
+    db = ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`;
+  } else if (r.dependabot && r.dependabot.state === "stale") {
+    const detail = (r.dependabot.stale || [])
+      .map((s) => `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})`)
+      .join("\n");
+    db = ` <span class="db-stale" title="Configured but not running:\n${esc(detail)}\n\nNo error — Dependabot has simply gone quiet. Usually open-pull-requests-limit is reached, or GitHub paused the schedule.">⏱ dependabot idle</span>`;
+  }
   // reverse dependency: other org repos that depend on this one
   const deps = (r.dependents || []).length
     ? ` <span class="dep-tag" title="Depended on by: ${esc((r.dependents || []).join(", "))}">↩ used by ${r.dependents.length} repo${r.dependents.length > 1 ? "s" : ""}</span>`
@@ -1749,6 +1782,7 @@ function recomputeComplianceSummary() {
     // Keep in step with the server's summary (server.js /api/compliance) — this runs after
     // a local mutation (archive/delete), and a dropped key would hide the warning banner.
     dependabotBlocked: reps.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
+    dependabotStale: reps.filter((r) => r.dependabot && r.dependabot.state === "stale").length,
   };
 }
 
@@ -3931,12 +3965,21 @@ function jobBusyHtml(status, kind) {
 let _renderTimer = null;
 function scheduleRender() {
   if (_renderTimer) return;
-  _renderTimer = setTimeout(() => {
+  // A poll-driven rebuild replaces the cards wholesale, which yanks an open dropdown out
+  // of the DOM mid-interaction: the CI poll fires every 10s, so opening the reviewer picker
+  // shortly after a CI/review change would see it vanish, then "work" on the second try
+  // once the snapshot settled. Worse for the picker specifically — it holds ticks that
+  // haven't been applied yet, so the rebuild would silently discard them. So wait for the
+  // menu to close instead of dropping the update; re-arming keeps the refresh pending
+  // however long it stays open.
+  const attempt = () => {
+    if (document.querySelector(".dd-menu:not([hidden])")) { _renderTimer = setTimeout(attempt, 300); return; }
     _renderTimer = null;
     const y = window.scrollY;
     render();
     window.scrollTo(0, y);
-  }, 180);
+  };
+  _renderTimer = setTimeout(attempt, 180);
 }
 
 // Single list of the card actions toggled while a job runs, so the disable

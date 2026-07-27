@@ -617,7 +617,30 @@ SOC 2 change-management (CC8.1) wants every in-scope repo's default branch prote
 no merge without review — plus an auditable record of *which* repos are in scope. Two
 features cover that.
 
-### ⚠ Dependabot blocked — when the alert feed is lying
+### ⚠ Dependabot silent — when the alert feed is lying
+
+Dependabot failing is not the problem; Dependabot failing **quietly** is. Every way it dies
+looks the same from outside — the updater goes quiet, with no error, no PR, and a green tick
+on the last job it ran. The Compliance tab checks for two of them.
+
+#### ⏱ Idle — a configured ecosystem stopped running
+
+The blunt question: this repo asks for weekly `hex` updates, so when did a version-update
+job for `hex` last actually run? An ecosystem quiet for more than **2× its interval (plus a
+day)** gets flagged. That catches every cause at once — `open-pull-requests-limit` reached,
+GitHub pausing a schedule, or a persistent job error — without needing to model any of them.
+
+Costs one `gh run list` per repo, no log downloads. Two details matter: dependabot.yml names
+ecosystems differently from the job labels (`mix` → **`hex`**, `npm` → `npm_and_yarn`,
+`gomod` → `go_modules`), and **security** jobs are excluded — they're alert-driven and keep
+firing after the scheduled ones have stopped, so counting them as liveness would mask
+exactly the failure being looked for.
+
+Real example: a repo whose `hex` updates stopped for 105 days because it had hit the default
+`open-pull-requests-limit: 5`. Its `github-actions` ecosystem (3 open PRs) kept running the
+whole time, and its npm *security* jobs did too — so from the Actions tab it looked alive.
+
+#### ⚠ Blocked — an unreachable git dependency
 
 A dependency pulled straight from a git repo (`gem "x", github: "org/x"`,
 `"pkg": "github:org/pkg"`) has to be **cloneable** during resolution. If Dependabot can't
@@ -630,9 +653,11 @@ looks clean because nothing scanned it. Observed on a real repo where one unreac
 git gem blocked all 28 gems that needed an update — security updates included — for six
 weeks, with nothing in the UI to show for it.
 
-The Compliance tab flags this: affected repos get a red **⚠ dependabot blocked** badge,
-a **⚠ Dependabot blocked** filter appears (only when non-zero), and a banner names the
-exact repos to grant access to. Detection is predictive rather than log-scraping — it
+Affected repos get a red **⚠ dependabot blocked** badge (idle ones get an amber
+**⏱ dependabot idle**), a **⚠ Dependabot silent** filter appears covering both, and each
+cause gets its own banner — same symptom, different fix, so merging them would muddle both.
+Blocked outranks idle on a repo that's somehow both: the unreachable dep is usually the
+*cause* of the silence and names a concrete fix. Detection is predictive rather than log-scraping — it
 reads each repo's manifests plus the org's Dependabot access policy
 (`GET /orgs/{org}/dependabot/repository-access`), so it fires the moment someone *adds*
 a private git dep rather than after a run has already failed, and it can name the fix.

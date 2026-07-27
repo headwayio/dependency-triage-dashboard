@@ -256,6 +256,20 @@ button.act-unignore { color: var(--accent); border-color: var(--accent); }
   line-height: 1.6;
 }
 .comp-warn code { background: rgba(0, 0, 0, 0.3); padding: 1px 5px; border-radius: 4px; }
+/* "Stopped running" is a weaker signal than "provably broken" — amber, not red. */
+.comp-warn.stale { border-color: #4a3f1c; background: var(--medium-bg); }
+.stale-list { display: flex; flex-direction: column; gap: 2px; margin: 8px 0 6px; font-size: 12px; }
+.db-stale {
+  font-size: 11px;
+  font-weight: 650;
+  padding: 1px 7px;
+  border-radius: 20px;
+  white-space: nowrap;
+  color: var(--medium);
+  background: var(--medium-bg);
+  border: 1px solid #4a3f1c;
+  cursor: help;
+}
 .comp-warn-link {
   font-size: 12px;
   padding: 2px 10px;
