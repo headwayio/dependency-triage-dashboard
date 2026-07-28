@@ -60,6 +60,7 @@ async function startServer({ config = {}, scenario = "default" } = {}) {
   fs.mkdirSync(stubDir);
   fs.writeFileSync(path.join(stubDir, "scenario"), scenario);
   fs.writeFileSync(path.join(stubDir, "gh.log"), "");
+  fs.writeFileSync(path.join(stubDir, "claude.log"), "");
 
   const port = await freePort();
   const merged = { ...DEFAULT_CONFIG, ...config, port };
@@ -116,6 +117,10 @@ async function startServer({ config = {}, scenario = "default" } = {}) {
       const hits = this.ghArgs().filter((line) => line.startsWith(prefix.join(" ")));
       if (hits.length > 1) throw new Error(`expected one \`gh ${prefix.join(" ")}\`, saw ${hits.length}:\n${hits.join("\n")}`);
       return hits[0] || null;
+    },
+    /** Every `claude` invocation. Usually asserted EMPTY — no test should launch a session. */
+    claudeArgs() {
+      return fs.readFileSync(path.join(stubDir, "claude.log"), "utf8").split("\n").filter(Boolean);
     },
     serverLog: () => log,
     stop() {

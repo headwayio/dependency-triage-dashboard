@@ -97,7 +97,11 @@ GitHub, and testing a reimplementation of them proves nothing. Instead:
 
 - **`test/helpers/bin/gh`** is a stand-in for the `gh` CLI, put first on `PATH`. It serves small
   literal fixtures chosen by a scenario name, and appends **every invocation** to a log.
-- **`test/helpers/harness.js`** boots the **real `server.js`** against it — from a copy in a temp
+- **`test/helpers/bin/claude`** shadows the `claude` CLI the same way. Several routes launch a
+  headless session; without this, a test that got further than expected would spawn a **real**
+  one against your account. It records the call and exits non-zero, so tests can assert that no
+  session was launched rather than assume it.
+- **`test/helpers/harness.js`** boots the **real `server.js`** against them — from a copy in a temp
   dir, since the server resolves `config.json` and its state files from its own `__dirname` and
   would otherwise read your real config and write your real state. Each test gets its own server
   and temp dir, so a route that mutates the model cache can't leak into the next one.
