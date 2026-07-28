@@ -101,19 +101,31 @@ GitHub, and testing a reimplementation of them proves nothing. Instead:
   headless session; without this, a test that got further than expected would spawn a **real**
   one against your account. It records the call and exits non-zero, so tests can assert that no
   session was launched rather than assume it.
-- **`test/helpers/harness.js`** boots the **real `server.js`** against them — from a copy in a temp
-  dir, since the server resolves `config.json` and its state files from its own `__dirname` and
-  would otherwise read your real config and write your real state. Each test gets its own server
-  and temp dir, so a route that mutates the model cache can't leak into the next one.
+- **`test/helpers/harness.js`** boots the **real `server.js`** against them — from a copy in a
+  temp dir, since the server resolves `config.json` and its state files from its own `__dirname`
+  and would otherwise read your real config and write your real state. Each test gets its own
+  server and temp dir, so a route that mutates the model cache can't leak into the next one.
 
 So a test exercises genuine route code with no network and no victim repo. Assertions go on the
 **recorded `gh` argv**, not just the response body: the body only proves the server *reported* a
 merge, while the argv proves it asked for the right one — `--squash` vs `--merge`,
 `--delete-branch` or not, and `--admin` never. That distinction is where the real bugs were.
 
-Adding a case usually means adding one `scenario` branch to the stub. The pattern generalises to
-every mutating route (`/api/rollup`, `/api/consolidate`, `/api/rebase`, `/api/dismiss-alerts`),
-which are all shaped the same way and rather more destructive than a merge.
+Routes that start a **background job** (rollup, consolidate, rebase) answer immediately with a
+job id, so the harness also exposes `waitForJob()` and `events()` — the latter subscribes to the
+job's NDJSON stream, which is the only place per-PR ordering and the session's decisions are
+visible. Subscribe *before* calling the route: the server replays a still-active job's buffered
+events on connect, but a finished job is gone.
+
+Covered today: **`/api/merge-pr`** and **`/api/rollup`**. Adding a case usually means one new
+`scenario` branch in the stub. The pattern generalises to the rest (`/api/consolidate`,
+`/api/rebase`, `/api/dismiss-alerts`), which are shaped the same way.
+
+A note on writing these: check that a test **fails when the thing it names is broken**. Two of
+these were initially green against deliberately broken code — one because the fixture happened
+to list PRs in the order the test requested, making a sort a no-op, and one because the mutation
+patched an identically-worded filter elsewhere in the file. Neither would have been caught by
+reading them.
 
 ## Prerequisites
 
