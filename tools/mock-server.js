@@ -172,6 +172,11 @@ const repos = [
     contact: null, notifiedAt: null, newAdvisoryCount: 0, disposition: null,
     // CI green, but no approval yet → lands in the "Passing PR" tab awaiting review.
     openPRs: [{ number: 89, url: "https://github.com/acme-corp/checkout-api/pull/89", draft: false, reviewDecision: null, reviewers: ["caseylee"] }],
+    reviewerOptions: [
+      { handle: "caseylee", display: "caseylee", isTeam: false },
+      { handle: "jordanp", display: "jordanp", isTeam: false },
+      { handle: "acme-corp/platform", display: "platform", isTeam: true },
+    ],
     engagement: null,
   },
   {
@@ -254,7 +259,11 @@ const repos = [
   },
 ];
 
-const model = { org: "acme-corp", generatedAt: new Date().toISOString(), repos };
+const model = {
+  org: "acme-corp", generatedAt: new Date().toISOString(), repos,
+  // Fallback roster for a repo nobody has reviewed yet (reviewerOptions empty).
+  orgMembers: ["ana-dev", "caseylee", "jordanp", "morgan-ops", "sam-qa"].map((h) => ({ handle: h, display: h, isTeam: false })),
+};
 
 // ---- side-channel fixtures ---------------------------------------------------
 const eolStatus = {
@@ -292,17 +301,21 @@ const compRepo = (name, opts = {}) => ({
   protectionScope: !!opts.protectionScope, protected: "protected" in opts ? opts.protected : null,
   isGem: !!opts.isGem, published: opts.published || null, dependents: opts.dependents || [],
   engagement: opts.engagement || null,
+  dependabot: opts.dependabot || { state: "ok", blockedBy: [], stale: [] },
 });
 
 const complianceRepos = [
   compRepo("acme-rails-app", { scope: "in", classification: "maintained", protectionScope: true, protected: false, pushedAt: days(4), dependents: [] }),
   compRepo("acme-core-gem", { scope: "in", classification: "maintained", protectionScope: true, protected: true, isGem: true, published: { registry: "rubygems" }, dependents: ["acme-rails-app", "acme-api"], pushedAt: days(12) }),
-  compRepo("acme-api", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(9) }),
+  compRepo("acme-api", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(9), dependabot: { state: "blocked", blockedBy: ["acme-private-gem"] } }),
   compRepo("acme-frontend", { scope: "in", classification: "maintained", protectionScope: true, protected: false, pushedAt: days(1) }),
-  compRepo("data-pipeline", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(3) }),
+  compRepo("data-pipeline", { scope: "in", classification: "maintained", protectionScope: true, protected: true, pushedAt: days(3), dependabot: { state: "blocked", blockedBy: ["acme-private-gem"] } }),
   compRepo("internal-tools-gem", { scope: "out", scopeDerived: "in", scopeOverride: { scope: "out", reason: "Internal gem — outside the customer boundary.", at: days(20) }, classification: "maintained", isGem: true, published: { registry: "rubygems" }, dependents: ["acme-rails-app"], pushedAt: days(21) }),
   compRepo("client-site-alpha", { classification: "monitored", pushedAt: days(200), engagement: { at: days(90), kind: "engagement", from: "maintained", to: "monitored", note: "SOW ended; client self-manages.", sowEndDate: "2026-03-15" } }),
-  compRepo("client-site-beta", { classification: "monitored", pushedAt: days(310) }),
+  compRepo("client-site-beta", { classification: "monitored", pushedAt: days(310), dependabot: { state: "stale", blockedBy: [], stale: [
+    { ecosystem: "mix", label: "hex", interval: "weekly", lastRunAt: days(105), ageDays: 105, staleAfterDays: 15 },
+    { ecosystem: "npm", label: "npm_and_yarn", interval: "weekly", lastRunAt: null, ageDays: null, staleAfterDays: 15 },
+  ] } }),
   compRepo("client-site-gamma", { classification: "monitored", pushedAt: days(280) }),
   compRepo("old-experiment", { classification: "ignored", pushedAt: days(800) }),
   compRepo("dormant-marketing-site", { classification: "ignored", pushedAt: days(900) }),
@@ -319,6 +332,8 @@ const compliance = {
     outScope: complianceRepos.filter((r) => r.scope === "out").length,
     overridden: complianceRepos.filter((r) => r.scopeOverride).length,
     unprotected: complianceRepos.filter((r) => r.protectionScope && r.protected === false).length,
+    dependabotBlocked: complianceRepos.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
+    dependabotStale: complianceRepos.filter((r) => r.dependabot && r.dependabot.state === "stale").length,
   },
   archived: [
     { name: "retired-app-2019", url: "https://github.com/acme-corp/retired-app-2019", pushedAt: days(1500), visibility: "PRIVATE" },
@@ -392,6 +407,23 @@ http.createServer((req, res) => {
       if (route === "/api/scope-override") return json(res, { repo: b.repo, scope: b.scope || "out", override: b.scope ? { scope: b.scope, reason: b.reason } : null, derived: "out" });
       if (route === "/api/protect-branch") return json(res, { repo: b.repo, branch: "main", updated: false, rulesetId: 1 });
       if (route === "/api/unprotect-branch") return json(res, { repo: b.repo, removed: true, stillProtected: false, via: null });
+      // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
+      // the picker renders from that response, so a canned reply would make it look broken.
+      if (route === "/api/request-review") {
+        // ?nullreviewers=1 mimics the real server answering when the PR is absent from
+        // its model cache — it returns reviewers:null and the client must not regress.
+        if (u.searchParams.get("nullreviewers") === "1") return json(res, { repo: b.repo, number: Number(b.number), added: [], removed: [], reviewers: null });
+        const repo = repos.find((r) => r.name === b.repo);
+        const pr = repo && (repo.openPRs || []).find((p) => p.number === Number(b.number));
+        const display = (h) => String(h).split("/").pop();
+        const add = Array.isArray(b.add) ? b.add : b.reviewer ? [b.reviewer] : [];
+        const gone = new Set((Array.isArray(b.remove) ? b.remove : []).map(display));
+        const reviewers = pr
+          ? [...new Set([...(pr.reviewers || []).filter((x) => !gone.has(x)), ...add.map(display)])]
+          : [];
+        if (pr) pr.reviewers = reviewers; // persists for this process, so a re-render agrees
+        return json(res, { repo: b.repo, number: Number(b.number), added: add, removed: [...gone], reviewers });
+      }
       json(res, { ok: true });
     });
     return;

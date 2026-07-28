@@ -13,6 +13,7 @@ const { createUpdatePR } = require("./lib/updater");
 const { buildClientEmail } = require("./lib/email");
 const { run } = require("./lib/exec");
 const ci = require("./lib/ci");
+const dependabot = require("./lib/dependabot");
 const { createFixSession } = require("./lib/fixer");
 const { createConstraintBumpPR } = require("./lib/bumper");
 const { createUnblockPR, createMajorUpgradePRs, dedupeMajors, majorsNeedingPR } = require("./lib/upgrader");
@@ -220,10 +221,26 @@ async function enrichCompliance(orgRepos, force) {
     const set = orgRepos.filter((r) => !isDormant(r.pushedAt) || inScope(r.name));
     const work = set.map((r) => ({ name: r.name }));
     await gh.enrichComplianceRepos(config.org, work);
+    // Dependabot health: one org-level policy read, then a pure-local verdict per repo.
+    // Visibility comes from the full org listing (not just the scanned subset), since the
+    // git dep is usually a gem repo nobody would scan on its own.
+    const access = await dependabot.fetchAccess(config.org);
+    const visByName = new Map(orgRepos.map((r) => [r.name, r.visibility]));
     const dependents = {};
     for (const r of work) for (const dep of r.dependsOnOrg || []) (dependents[dep] = dependents[dep] || []).push(r.name);
     const out = {};
-    for (const r of work) out[r.name] = { isGem: r.isGem, published: r.published, dependsOnOrg: r.dependsOnOrg };
+    const now = Date.now();
+    for (const r of work) {
+      out[r.name] = {
+        isGem: r.isGem,
+        published: r.published,
+        dependsOnOrg: r.dependsOnOrg,
+        dependabot: dependabot.verdict(
+          dependabot.assess(r.gitDeps, access, (n) => visByName.get(n)),
+          dependabot.staleEcosystems(r.dependabotConfig, r.dependabotRuns, now)
+        ),
+      };
+    }
     for (const name of Object.keys(dependents)) {
       out[name] = out[name] || {};
       out[name].dependents = dependents[name];
@@ -766,6 +783,19 @@ const STATE_RANK = { failing: 3, pending: 2, none: 1, unknown: 0, passing: 0 };
 
 async function pollCI() {
   if (!modelCache) return;
+  // Release the fix budget for any repo with no open tool PR left: the work either merged
+  // or was closed, so the fix→new-SHA→fail chain the per-repo cap guards against has
+  // ended. This is the COMMON success path and the all-green sweep below can't see it —
+  // that one only walks repos with open PRs, so a fix whose PR merged leaves its attempts
+  // on the books forever, and enough of those silently cap a repo for a reason that no
+  // longer exists. Runs before the early return, since "nothing pending" is exactly the
+  // case that needs it.
+  for (const r of modelCache.repos) {
+    if (r.archived || (r.pending && (r.openPRs || []).length)) continue;
+    if (activeFixJob(r.name)) continue; // mid-flight — its attempt still counts
+    const cleared = state.clearFixAttempts(r.name);
+    if (cleared) console.log(`  ${r.name}: no open tool PR — released the fix budget (${cleared} record(s) cleared).`);
+  }
   const pending = modelCache.repos.filter((r) => !r.archived && r.pending && (r.openPRs || []).length);
   if (!pending.length) return;
   // Fetch every pending PR's review + CI state in ONE GraphQL call so the poll cost is
@@ -782,6 +812,7 @@ async function pollCI() {
     }
   }
   const worstByRepo = new Map();
+  const repoCI = new Map(); // repo -> per-state PR tally, for the green-releases-budget check
   const fixStarted = new Set(); // one fix session per repo per pass
   for (const it of items) {
     const { r, pr, nwo } = it;
@@ -799,6 +830,11 @@ async function pollCI() {
     pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
     const w = worstByRepo.get(r.name);
     if (!w || (STATE_RANK[st.state] || 0) > (STATE_RANK[w.state] || 0)) worstByRepo.set(r.name, st);
+    // Tally per state rather than reusing worstByRepo: passing and unknown share a rank
+    // there, so "the worst is passing" can't distinguish green from no-data.
+    const tally = repoCI.get(r.name) || { failing: 0, pending: 0, passing: 0 };
+    if (st.state === "failing" || st.state === "pending" || st.state === "passing") tally[st.state] += 1;
+    repoCI.set(r.name, tally);
 
     if (
       config.autoFixCI &&
@@ -816,6 +852,16 @@ async function pollCI() {
       startFixJob(r, pr, st, failingLogs);
       fixStarted.add(r.name);
     }
+  }
+  // A repo whose PRs have ALL settled green is fixed — release its per-repo fix budget so
+  // the next, unrelated failure isn't met with an exhausted counter. Requires an actual
+  // passing PR (not merely "nothing failing" — "none"/"unknown" means no data, not success)
+  // and nothing still running, so a half-finished re-run can't bank an early reset.
+  for (const [name, tally] of repoCI) {
+    if (tally.failing || tally.pending || !tally.passing) continue;
+    if (activeFixJob(name)) continue; // a session is mid-flight — let it finish and be counted
+    const cleared = state.clearFixAttempts(name);
+    if (cleared) console.log(`  ${name}: CI green — released the fix budget (${cleared} record(s) cleared).`);
   }
   for (const [name, worst] of worstByRepo) ciStatus.set(name, { ...worst, at: Date.now() });
 }
@@ -1142,26 +1188,41 @@ const server = http.createServer(async (req, res) => {
 
     // Add a reviewer to one PR (the dashboard's one-click "Request review from @who").
     if (req.method === "POST" && route === "/api/request-review") {
-      const { repo, number, reviewer } = await repoBody(req);
+      // Takes a batch: `add`/`remove` handle arrays (the picker applies its whole diff in
+      // one call when it closes), or a single `reviewer` for the one-click chip.
+      const { repo, number, reviewer, add, remove } = await repoBody(req);
       const num = Number(number);
       if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
-      const handle = String(reviewer || "").trim();
-      if (!handle || !/^[A-Za-z0-9._/-]+$/.test(handle)) return sendJSON(res, 400, { error: "Valid reviewer handle required." });
+      const clean = (v) => (Array.isArray(v) ? v : []).map((x) => String(x || "").trim()).filter(Boolean);
+      const toAdd = add === undefined && reviewer ? [String(reviewer).trim()] : clean(add);
+      const toRemove = clean(remove);
+      if (!toAdd.length && !toRemove.length) return sendJSON(res, 400, { error: "Nothing to change." });
+      const bad = [...toAdd, ...toRemove].find((h) => !/^[A-Za-z0-9._/-]+$/.test(h));
+      if (bad) return sendJSON(res, 400, { error: `Invalid reviewer handle: ${bad}` });
       const nwo = `${config.org}/${repo}`;
-      const out = await run("gh", ["pr", "edit", String(num), "--repo", nwo, "--add-reviewer", handle]);
+      const args = ["pr", "edit", String(num), "--repo", nwo];
+      for (const h of toAdd) args.push("--add-reviewer", h);
+      for (const h of toRemove) args.push("--remove-reviewer", h);
+      const out = await run("gh", args);
       if (out.code !== 0) return sendJSON(res, 502, { error: (out.stderr || "gh pr edit failed").trim() });
-      // Reflect the request in the cache so the badge updates without a full Refresh.
+      // Reflect the change in the cache so the badge updates without a full Refresh.
+      // `reviewers` holds display names (login, or a team's slug), so compare on those.
       let reviewers = null;
       if (modelCache) {
         const r = modelCache.repos.find((x) => x.name === repo);
         const pr = r && (r.openPRs || []).find((p) => p.number === num);
         if (pr) {
-          pr.reviewers = Array.from(new Set([...(pr.reviewers || []), handle.split("/").pop()]));
-          if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+          const gone = new Set(toRemove.map((h) => h.split("/").pop()));
+          const next = (pr.reviewers || []).filter((x) => !gone.has(x));
+          pr.reviewers = Array.from(new Set([...next, ...toAdd.map((h) => h.split("/").pop())]));
+          // Clear the decision when the last reviewer goes, not just set it when one
+          // arrives — otherwise a stale REVIEW_REQUIRED outlives the request it described.
+          if (!pr.reviewers.length) pr.reviewDecision = null;
+          else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
           reviewers = pr.reviewers;
         }
       }
-      return sendJSON(res, 200, { repo, number: num, reviewer: handle, reviewers });
+      return sendJSON(res, 200, { repo, number: num, added: toAdd, removed: toRemove, reviewers });
     }
 
     // Flip one draft PR to ready-for-review.
@@ -1578,6 +1639,9 @@ const server = http.createServer(async (req, res) => {
           published: e.published || null,
           dependents: e.dependents || [],
           engagement: engMap[r.name] || null,
+          // "blocked" = an unreachable git dep is silently killing EVERY dependency
+          // update here, so this repo's alert counts can't be trusted (lib/dependabot.js).
+          dependabot: e.dependabot || null,
         };
       });
       const by = (f) => repos.filter(f).length;
@@ -1587,6 +1651,10 @@ const server = http.createServer(async (req, res) => {
         outScope: by((x) => x.scope === "out"),
         overridden: by((x) => x.scopeOverride),
         unprotected: by((x) => x.protectionScope && x.protected === false),
+        // Two different silences, counted together for the banner: an unreachable git dep,
+        // or a configured ecosystem that simply stopped running.
+        dependabotBlocked: by((x) => x.dependabot && x.dependabot.state === "blocked"),
+        dependabotStale: by((x) => x.dependabot && x.dependabot.state === "stale"),
       };
       const archived = archivedRepos.map((r) => ({ name: r.name, url: r.url, pushedAt: r.pushedAt, visibility: r.visibility }));
       return sendJSON(res, 200, { repos, summary, archived, protectionPending, enrichPending });

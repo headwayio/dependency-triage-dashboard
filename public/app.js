@@ -24,6 +24,10 @@ const TABS = [
 // PR-lifecycle tabs (Pending/Passing/Approved) always show, so the bar is stable and a PR
 // visibly advances through fixed columns rather than tabs popping in and out.
 const HIDE_WHEN_EMPTY = new Set(["untriaged", "covered"]);
+// Tabs that are about a DECISION rather than about vulnerabilities, so they also cover
+// repos with no open alerts — pulled from the full org inventory (see withoutAlerts).
+// Each key doubles as the classification it matches.
+const LITE_TABS = new Set(["untriaged", "ignored"]);
 // The three PR-lifecycle tabs — they share CI/review polling, the PR toolbar, and
 // the branch-protection bar. Bucketing among them depends on live CI + review state.
 const PR_TABS = new Set(["pending", "passing", "approved"]);
@@ -309,10 +313,15 @@ function renderSummary() {
 
 function renderTabs() {
   const p = partition();
+  // Untriaged and Ignored also hold repos with no open alerts, which live in the inventory
+  // rather than the alert model — so the total has to fold both in. Getting this wrong on
+  // Untriaged doesn't just under-count: an org whose only unclassified repos are alert-free
+  // would fail the hide-when-empty test below and never show a Triage tab at all.
+  const total = (key) => p[key].length + (LITE_TABS.has(key) ? withoutAlerts(key).length : 0);
   // Untriaged is the default catch-all bucket — hide its tab when empty (it
   // reappears the moment a repo lands there again). Every other tab always shows
   // so its count stays visible at a glance.
-  const tabs = TABS.filter((t) => !HIDE_WHEN_EMPTY.has(t.key) || p[t.key].length > 0);
+  const tabs = TABS.filter((t) => !HIDE_WHEN_EMPTY.has(t.key) || total(t.key) > 0);
   // If the active tab is the one we just hid, fall back to the first visible tab.
   if (!tabs.some((t) => t.key === STATE.tab)) STATE.tab = tabs[0].key;
   // Compliance badge: while repos still need a scope decision, show that triage queue;
@@ -323,9 +332,7 @@ function renderTabs() {
       if (!STATE.complianceData) return "·";
       return STATE.complianceData.summary.inScope; // repos inside the SOC 2 boundary
     }
-    // Ignored also includes ignored repos with no open alerts (pulled from the inventory).
-    if (t.key === "ignored") return p.ignored.length + ignoredWithoutAlerts().length;
-    return p[t.key].length;
+    return total(t.key);
   };
   // Tabs aren't visibly numbered, but respond to 1–5 / 0 (see jumpToTabByNumber + the ? help).
   $("#tabs").innerHTML = tabs
@@ -396,12 +403,16 @@ function renderCards() {
   const content = $("#content");
   const q = (STATE.alertSearch || "").trim().toLowerCase();
   const full = partition()[STATE.tab];
-  // The Ignored tab also surfaces ignored repos with NO open alerts — they never reach the
+  // Untriaged and Ignored also surface repos with NO open alerts — they never reach the
   // alert model, so we pull them from the full inventory and render them as compact rows.
-  const extraIgnored = STATE.tab === "ignored"
-    ? ignoredWithoutAlerts().filter((r) => !q || r.name.toLowerCase().includes(q))
+  // That inventory is pre-loaded on boot, but a tab switch can beat it: kick the load so
+  // the tab fills in rather than claiming everything is classified.
+  const lite = LITE_TABS.has(STATE.tab);
+  if (lite && !STATE.complianceData) loadComplianceData();
+  const extraLite = lite
+    ? withoutAlerts(STATE.tab).filter((r) => !q || r.name.toLowerCase().includes(q))
     : [];
-  if (!full.length && !extraIgnored.length) {
+  if (!full.length && !extraLite.length) {
     const msg = {
       untriaged: "Nothing to triage — every repo is classified 🎉",
       maintained: "No actively-maintained repos with open alerts 🎉",
@@ -453,7 +464,7 @@ function renderCards() {
   STATE.compCursor = Math.max(0, Math.min(STATE.compCursor, STATE.compRows.length - 1));
   const grid = document.createElement("div");
   grid.className = "grid";
-  if (!ordered.length && !extraIgnored.length) {
+  if (!ordered.length && !extraLite.length) {
     grid.innerHTML = `<div class="empty">No repos match “${esc(STATE.alertSearch)}”.</div>`;
   }
   ordered.forEach(({ repo, depth, parentName }, i) => {
@@ -467,18 +478,18 @@ function renderCards() {
     }
     grid.appendChild(c);
   });
-  // Compact rows for ignored repos with no open alerts (continue the cursor index past the cards).
-  if (extraIgnored.length) {
+  // Compact rows for repos with no open alerts (continue the cursor index past the cards).
+  if (extraLite.length) {
     const base = STATE.compRows.length;
-    extraIgnored.forEach((r, j) => {
-      const c = ignoredLiteCard(r);
+    extraLite.forEach((r, j) => {
+      const c = liteCard(r, STATE.tab);
       const idx = base + j;
       c.dataset.idx = idx;
       if (idx === STATE.compCursor) c.classList.add("cursor");
       if (STATE.compSelected.has(r.name)) { c.classList.add("selected"); const cb = c.querySelector(".nav-check"); if (cb) cb.checked = true; }
       grid.appendChild(c);
     });
-    STATE.compRows = STATE.compRows.concat(extraIgnored);
+    STATE.compRows = STATE.compRows.concat(extraLite);
     STATE.compCursor = Math.max(0, Math.min(STATE.compCursor, STATE.compRows.length - 1));
   }
   content.appendChild(grid);
@@ -491,6 +502,15 @@ function renderCards() {
   });
   grid.querySelectorAll(".row-unignore").forEach((b) =>
     b.addEventListener("click", (e) => { e.stopPropagation(); onUnignore(e.currentTarget.closest("[data-repo]").dataset.repo); })
+  );
+  // Track-as on an alert-free untriaged row. These repos live only in the inventory, so
+  // they classify through the same path the Compliance tab uses, not the card's onClassify
+  // (which mutates an alert-model repo that doesn't exist here).
+  grid.querySelectorAll(".lite-cls").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onComplianceClassify(e.currentTarget.closest("[data-repo]").dataset.repo, e.currentTarget.dataset.state);
+    })
   );
   bar.querySelectorAll(".comp-selbar [data-kb]").forEach((b) => b.addEventListener("click", () => navAction(b.dataset.kb)));
   wireSearch(bar, (v) => { STATE.alertSearch = v; }, renderCards); // term is ephemeral (cleared on tab switch)
@@ -531,31 +551,47 @@ function prEntryToolbar(entries) {
   return bar;
 }
 
-// Ignored repos that have NO open alerts, so they never appear in the alert model — pulled
-// from the full inventory (Compliance data) so the Ignored tab can show the complete set.
-function ignoredWithoutAlerts() {
+// Repos with NO open alerts never enter the alert model at all, so the two tabs that are
+// about a *decision* rather than about vulnerabilities would silently miss them: a repo
+// nobody has classified yet, and one already ignored, are both perfectly likely to have
+// nothing flagged. Pull those from the full inventory (the Compliance data — every
+// non-archived org repo) so each tab shows the complete set. The tab key doubles as the
+// classification to match, and repos already in the alert model are excluded so a repo
+// never renders twice.
+function withoutAlerts(classification) {
   const d = STATE.complianceData;
   if (!d || !d.repos) return [];
   const inModel = new Set(((STATE.model && STATE.model.repos) || []).map((r) => r.name));
-  return d.repos.filter((r) => r.classification === "ignored" && !inModel.has(r.name));
+  return d.repos.filter((r) => (r.classification || "untriaged") === classification && !inModel.has(r.name));
 }
 
-// Compact card for an alert-free ignored repo (no alert data to show — just identity + undo).
-function ignoredLiteCard(r) {
+// Compact card for an alert-free repo — there's no alert data to show, just identity and
+// the one decision its tab is for: Track-as on Untriaged, undo on Ignored.
+function liteCard(r, kind) {
   const el = document.createElement("div");
-  el.className = "card alert-row nav-row ignored lite-row";
+  el.className = "card alert-row nav-row lite-row" + (kind === "ignored" ? " ignored" : "");
   el.dataset.repo = r.name;
   const push = r.pushedAt ? relTime(r.pushedAt) : "—";
+  const tag =
+    kind === "ignored"
+      ? `<span class="badge ignored-tag">ignored</span>`
+      : `<span class="badge untriaged-tag">untriaged</span>`;
+  const actions =
+    kind === "ignored"
+      ? `<button class="row-unignore">Un-ignore</button>`
+      : `<div class="classify"><span class="classify-label">Track as</span>` +
+        ENGAGEMENTS.map(([st, lbl]) => `<button class="cls-btn lite-cls" data-state="${st}">${lbl}</button>`).join("") +
+        `</div>`;
   el.innerHTML =
     `<input type="checkbox" class="nav-check" aria-label="select ${esc(r.name)}">` +
     `<div class="ar-body">` +
     `<div class="ar-l1">` +
     `<a class="ar-name" href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a>` +
-    `<span class="badge ignored-tag">ignored</span>` +
+    tag +
     `<span class="muted">· no open alerts</span>` +
     `</div>` +
     `<div class="ar-l2"><span class="ar-meta">${r.visibility ? esc(r.visibility.toLowerCase()) + " · " : ""}last push ${esc(push)}</span>` +
-    `<span class="ar-actions"><button class="row-unignore">Un-ignore</button></span></div>` +
+    `<span class="ar-actions">${actions}</span></div>` +
     `</div>`;
   return el;
 }
@@ -599,7 +635,7 @@ async function loadComplianceData(refresh) {
     STATE.complianceData = data;
     renderTabs(); // badge updates even if we're on another tab
     if (STATE.tab === "compliance") drawCompliance();
-    else if (STATE.tab === "ignored") renderCards(); // alert-free ignored repos live in the inventory
+    else if (LITE_TABS.has(STATE.tab)) renderCards(); // alert-free untriaged/ignored repos live in the inventory
     if (data.protectionPending || data.enrichPending) scheduleCompliancePoll();
   } catch (e) {
     if (STATE.tab === "compliance") $("#content").innerHTML = `<div class="banner">Failed to load the inventory: ${esc(e.message)}</div>`;
@@ -652,6 +688,7 @@ function drawCompliance() {
     in: (r) => r.scope === "in",
     out: (r) => r.scope === "out",
     overridden: (r) => !!r.scopeOverride,
+    blocked: (r) => r.dependabot && (r.dependabot.state === "blocked" || r.dependabot.state === "stale"),
     all: () => true,
   };
   // Coerce any stale stored filter (e.g. the old "undecided"/"needs") to a valid one.
@@ -676,9 +713,21 @@ function drawCompliance() {
     ["in", "In scope", s.inScope],
     ["out", "Out of scope", s.outScope],
     ["overridden", "Overridden", s.overridden],
+    // Exception state — shown only when it's non-zero, unlike the standing buckets above.
+    // A permanent "Dependabot blocked 0" would read as noise; its appearing at all is the alarm.
+    ...(s.dependabotBlocked + (s.dependabotStale || 0)
+      ? [["blocked", "⚠ Dependabot silent", s.dependabotBlocked + (s.dependabotStale || 0)]]
+      : []),
     ["all", "All", s.total],
     ["archived", "Archived", (d.archived || []).length],
   ];
+  // Every repo a blocked repo is waiting on — the exact set to grant Dependabot access to.
+  const blockers = [...new Set(d.repos.flatMap((r) => (r.dependabot && r.dependabot.blockedBy) || []))].sort();
+  // Ecosystems that have simply stopped running, worst (longest quiet) first.
+  const staleRows = d.repos
+    .filter((r) => r.dependabot && r.dependabot.state === "stale")
+    .flatMap((r) => (r.dependabot.stale || []).map((s2) => ({ repo: r.name, ...s2 })))
+    .sort((a, b) => (b.ageDays == null ? 1e9 : b.ageDays) - (a.ageDays == null ? 1e9 : a.ageDays));
 
   // Sortable column headers: click to sort, click again to flip direction.
   const arrow = (key) => (STATE.compSort.key === key ? ` <span class="sort-arrow">${STATE.compSort.dir === 1 ? "▲" : "▼"}</span>` : "");
@@ -709,14 +758,44 @@ function drawCompliance() {
       ? `<div class="comp-note">${(d.archived || []).length} archived repos — read-only, excluded from the active inventory and all dependency/compliance scans. Unarchive to bring one back, or delete to prune it.</div>`
       : `<div class="comp-actions-row">` +
         (s.unprotected ? `<button class="comp-bulk-btn protect-all" data-protect="1">🛡 Protect ${s.unprotected} unprotected</button>` : "") +
-        `</div>`) +
+        `</div>` +
+        // This is a "your scanning is lying to you" warning, not a to-do — it can't be
+        // fixed from here (granting access is an org setting), so it states the blast
+        // radius and names the exact repos to grant rather than offering a button.
+        (s.dependabotBlocked
+          ? `<div class="comp-warn">⚠ <strong>Dependabot is silently broken on ${s.dependabotBlocked} repo${s.dependabotBlocked === 1 ? "" : "s"}.</strong> ` +
+            `It can't clone ${blockers.map((b) => `<code>${esc(b)}</code>`).join(", ")}, so dependency resolution fails and <em>every</em> update there is skipped — security ones included. ` +
+            `Their alert counts are not trustworthy. Fix: grant Dependabot read access to ${blockers.length === 1 ? "that repo" : "those repos"} ` +
+            `(org Settings → Code security → Dependabot private repository access). ` +
+            `<button class="comp-warn-link" data-filter="blocked">Show the affected repos</button></div>`
+          : "") +
+        // Separate banner from the blocked one: same symptom (no updates), different cause
+        // and different fix, so merging them would muddle both.
+        (staleRows.length
+          ? `<div class="comp-warn stale">⏱ <strong>${staleRows.length} configured ecosystem${staleRows.length === 1 ? " has" : "s have"} stopped running.</strong> ` +
+            `Dependabot is scheduled for ${staleRows.length === 1 ? "it" : "them"} but hasn't produced a version-update job in a while — no error, just silence. ` +
+            `Common causes: <code>open-pull-requests-limit</code> reached (merge or close the open ones), or GitHub pausing the schedule. ` +
+            `<div class="stale-list">` +
+            staleRows
+              .slice(0, 6)
+              .map(
+                (x) =>
+                  `<span><code>${esc(x.repo)}</code> · ${esc(x.ecosystem)} · ` +
+                  (x.ageDays == null ? "never run" : `last ran ${x.ageDays}d ago`) +
+                  ` <span class="muted">(${esc(x.interval)}, flagged past ${x.staleAfterDays}d)</span></span>`
+              )
+              .join("") +
+            (staleRows.length > 6 ? `<span class="muted">…and ${staleRows.length - 6} more</span>` : "") +
+            `</div>` +
+            `<button class="comp-warn-link" data-filter="blocked">Show the affected repos</button></div>`
+          : "")) +
     `<div class="comp-selbar"${STATE.compSelected.size ? "" : " hidden"}>${STATE.compSelected.size ? selBarHtml() : ""}</div>` +
     `<table class="comp-table">${thead}<tbody>` +
     rows.map((r, i) => (onArchived ? archivedRow(r, i) : complianceRow(r, i))).join("") +
     `</tbody></table>` +
     (rows.length === 0 ? `<div class="empty">${onArchived ? "No archived repos." : "No repos in this view 🎉"}</div>` : "");
 
-  content.querySelectorAll(".comp-tab").forEach((b) =>
+  content.querySelectorAll(".comp-tab, .comp-warn-link").forEach((b) =>
     b.addEventListener("click", () => {
       STATE.complianceFilter = b.dataset.filter;
       lsSet("compliance.filter", STATE.complianceFilter);
@@ -853,12 +932,19 @@ function clearSelection() {
 }
 function selBarHtml() {
   const n = STATE.compSelected.size;
+  // Untriaged leads with the three Track-as choices — with a whole org to classify, doing
+  // it one card at a time is the slow path.
+  const track =
+    `<button class="selbar-btn" data-kb="m">Maintain <kbd>m</kbd></button> ` +
+    `<button class="selbar-btn" data-kb="w">Monitor <kbd>w</kbd></button> ` +
+    `<button class="selbar-btn" data-kb="i">Ignore <kbd>i</kbd></button> `;
   const btns =
     STATE.tab === "compliance"
       ? `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
         `<button class="selbar-btn" data-kb="s">Out of scope <kbd>s</kbd></button> ` +
         `<button class="selbar-btn" data-kb="n">Needs compliance <kbd>n</kbd></button> `
-      : `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
+      : (STATE.tab === "untriaged" ? track : "") +
+        `<button class="selbar-btn" data-kb="e">Archive <kbd>e</kbd></button> ` +
         `<button class="selbar-btn" data-kb="y">Copy links <kbd>y</kbd></button> `;
   return `<strong>${n}</strong> selected · ${btns}<button class="selbar-btn subtle" data-kb="clear">Clear <kbd>Esc</kbd></button>`;
 }
@@ -896,6 +982,15 @@ function navAction(key) {
     if (key === "w") return kbTrack("monitored");
     if (key === "i") return kbTrack("ignored");
     return;
+  }
+  // Triaging is the Untriaged tab's whole job, and it's the one alert tab whose rows can be
+  // alert-free inventory repos — so it takes Compliance's Track-as mnemonics. `m` means
+  // Maintain here rather than "mark ready for review" (a PR action that belongs to the PR
+  // tabs, and is still on the card's own button).
+  if (STATE.tab === "untriaged") {
+    if (key === "m") return kbTrack("maintained");
+    if (key === "w") return kbTrack("monitored");
+    if (key === "i") return kbTrack("ignored");
   }
   if (key === "e") return kbArchiveAlert();
   if (key === "#") return kbDelete();
@@ -1051,6 +1146,9 @@ function kbEmail() {
 async function kbTrack(toState) {
   const names = selectedOrCursor();
   if (!names.length) return;
+  // Reads the inventory, not the alert model — it's the list that has every repo, alerted
+  // or not. On the Untriaged tab it can still be mid-load.
+  if (!STATE.complianceData) { toast("The org inventory is still loading…"); return; }
   const clsOf = (n) => { const r = STATE.complianceData.repos.find((x) => x.name === n); return (r && r.classification) || "untriaged"; };
   const changing = names.filter((n) => clsOf(n) !== toState);
   if (!changing.length) { toast(`Already ${engagementLabel(toState)}.`); return; }
@@ -1064,6 +1162,7 @@ async function kbTrack(toState) {
   for (const name of changing) {
     try {
       await postJSON("/api/classify", { repo: name, state: toState, note: meta.note, sowEndDate: meta.sowEndDate });
+      syncModelClassification(name, toState);
     } catch {
       /* keep going */
     }
@@ -1272,6 +1371,7 @@ function showShortcutHelp() {
   const k = (...keys) => keys.map((s) => `<kbd>${esc(s)}</kbd>`).join("");
   const row = (keys, desc) => `<div class="kbd-keys">${keys}</div><div class="kbd-desc">${desc}</div>`;
   const onCompliance = STATE.tab === "compliance";
+  const onUntriaged = STATE.tab === "untriaged";
   const sections = [
     ["Navigate", [
       [k("h") + "/" + k("l"), "previous / next tab"],
@@ -1296,11 +1396,14 @@ function showShortcutHelp() {
       [k("p"), "protect the branch (maintained repos)"],
       [k("m") + " / " + k("w") + " / " + k("i"), "Track as Maintain / Monitor / Ignore"],
     ] : [
+      // Untriaged rebinds m to Maintain and adds w/i, so it can't advertise
+      // "mark ready for review" — see navAction / tabActionKeys.
+      [onUntriaged ? k("m") + " / " + k("w") + " / " + k("i") : "", onUntriaged ? "Track as Maintain / Monitor / Ignore (selected, or cursor row)" : ""],
       [k("u"), "open an update PR / re-run"],
       [k("U"), "propose a runtime upgrade (EOL)"],
       [k("R"), "roll up ready PRs into one release PR"],
       [k("c"), "review comments (first PR with feedback)"],
-      [k("m"), "mark a draft PR ready for review"],
+      [onUntriaged ? "" : k("m"), onUntriaged ? "" : "mark a draft PR ready for review"],
       [k("a"), "assign / request review (first eligible PR)"],
       [k("p"), "protect the branch"],
       [k("f"), "fix failing CI"],
@@ -1333,7 +1436,10 @@ function toast(msg) {
 }
 // Per-tab action keys (movement/select/search/copy are shared; these differ by tab).
 function tabActionKeys() {
-  return STATE.tab === "compliance" ? "e#rpmwi" : "e#rupfURcma";
+  if (STATE.tab === "compliance") return "e#rpmwi";
+  // Untriaged adds the Track-as keys (w/i) and rebinds m to Maintain — see navAction.
+  if (STATE.tab === "untriaged") return "e#rupfURcamwi";
+  return "e#rupfURcma";
 }
 // Two-stage search Esc: the input's first Esc blurs + arms this window; a second Esc
 // shortly after clears the kept term. Placed before the compRows guard so it still works
@@ -1460,24 +1566,37 @@ function archivedRow(r, idx) {
   );
 }
 
-// Set a repo's engagement classification (Track as) from the Compliance tab, then refresh
-// so the derived bits (protection scope/status) catch up with the new engagement.
+// Set a repo's engagement classification (Track as) from the inventory — the Compliance
+// tab's <select>, or an alert-free row on the Untriaged tab — then refresh so the derived
+// bits (protection scope/status) catch up with the new engagement.
 async function onComplianceClassify(repo, stateWanted) {
   const r = STATE.complianceData.repos.find((x) => x.name === repo);
   const from = (r && r.classification) || "untriaged";
   const to = stateWanted || "untriaged";
   if (from === to) return;
   const meta = await engagementNoteModal({ subject: repo, from, to });
-  if (!meta) { drawCompliance(); return; } // cancelled → re-render to reset the <select>
+  // Cancelled → the Compliance tab has to re-render to reset its <select>; the Untriaged
+  // tab's buttons hold no state, and repainting it from here would draw the compliance
+  // table into the wrong tab.
+  if (!meta) { if (STATE.tab === "compliance") drawCompliance(); return; }
   setRowsBusy([repo]);
   try {
     const data = await postJSON("/api/classify", { repo, state: stateWanted, note: meta.note, sowEndDate: meta.sowEndDate });
+    syncModelClassification(repo, data.state);
     toast(`${repo} tracked as ${engagementLabel(data.state)}.`);
     loadComplianceData(); // re-derive scope/protection with the new classification (clears busy on re-render)
   } catch (e) {
     clearRowBusy();
     alert("Couldn't classify: " + e.message);
   }
+}
+
+// A repo can sit in BOTH the inventory and the alert model. Classifying it from the
+// inventory has to update the model's copy too, or the alert tabs keep bucketing it by the
+// old engagement until the next Refresh.
+function syncModelClassification(repo, stateApplied) {
+  const mr = STATE.model && STATE.model.repos.find((x) => x.name === repo);
+  if (mr) mr.classification = stateApplied || "untriaged";
 }
 
 async function onComplianceUnarchive(repo) {
@@ -1517,6 +1636,16 @@ function complianceRow(r, idx) {
   if (r.published && r.published.registry === "rubygems") typeBadge = ` <span class="gem-tag pub" title="Published gem on rubygems.org">💎 rubygems</span>`;
   else if (r.published && r.published.registry === "npm") typeBadge = ` <span class="gem-tag pub" title="Published package on npm">📦 npm</span>`;
   else if (r.isGem) typeBadge = ` <span class="gem-tag" title="Has a .gemspec but isn't published to rubygems">💎 gem · unpublished</span>`;
+  // Dependabot isn't producing updates here — so "0 alerts" may mean unscanned, not clean.
+  let db = "";
+  if (r.dependabot && r.dependabot.state === "blocked") {
+    db = ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`;
+  } else if (r.dependabot && r.dependabot.state === "stale") {
+    const detail = (r.dependabot.stale || [])
+      .map((s) => `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})`)
+      .join("\n");
+    db = ` <span class="db-stale" title="Configured but not running:\n${esc(detail)}\n\nNo error — Dependabot has simply gone quiet. Usually open-pull-requests-limit is reached, or GitHub paused the schedule.">⏱ dependabot idle</span>`;
+  }
   // reverse dependency: other org repos that depend on this one
   const deps = (r.dependents || []).length
     ? ` <span class="dep-tag" title="Depended on by: ${esc((r.dependents || []).join(", "))}">↩ used by ${r.dependents.length} repo${r.dependents.length > 1 ? "s" : ""}</span>`
@@ -1553,7 +1682,7 @@ function complianceRow(r, idx) {
   return (
     `<tr class="${cls}" data-repo="${esc(r.name)}" data-idx="${idx}">` +
     `<td class="comp-check-col"><input type="checkbox" class="nav-check"${sel ? " checked" : ""} aria-label="select ${esc(r.name)}"></td>` +
-    `<td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a> <span class="vis">${esc(r.visibility)}</span>${typeBadge}${deps}${dormant}</td>` +
+    `<td><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.name)}</a> <span class="vis">${esc(r.visibility)}</span>${typeBadge}${deps}${dormant}${db}</td>` +
     `<td class="muted">${esc(push)}</td>` +
     `<td class="track-cell">${track}${engBadge}</td>` +
     `<td>${prot}</td>` +
@@ -1650,6 +1779,10 @@ function recomputeComplianceSummary() {
     outScope: reps.filter((r) => r.scope === "out").length,
     overridden: reps.filter((r) => r.scopeOverride).length,
     unprotected: reps.filter((r) => r.protectionScope && r.protected === false).length,
+    // Keep in step with the server's summary (server.js /api/compliance) — this runs after
+    // a local mutation (archive/delete), and a dropped key would hide the warning banner.
+    dependabotBlocked: reps.filter((r) => r.dependabot && r.dependabot.state === "blocked").length,
+    dependabotStale: reps.filter((r) => r.dependabot && r.dependabot.state === "stale").length,
   };
 }
 
@@ -1683,7 +1816,75 @@ function flashCard(name) {
 }
 
 function closeAllMenus() {
+  flushReviewerEdits(); // the reviewer picker batches its changes until it closes
   document.querySelectorAll(".dd-menu:not([hidden])").forEach((m) => (m.hidden = true));
+}
+
+// The reviewer picker is an editor, not a menu of actions: ticking and unticking names
+// only changes local state, and the whole diff is sent as ONE `gh pr edit` when the menu
+// closes. Applying per click would fire a request for every keystroke-equivalent — and
+// worse, an accidental untick would immediately un-request someone with no chance to undo
+// it before the menu shut. RR_EDIT holds the open picker's state; only one menu is ever
+// open (closeAllMenus is the single choke point), so a single slot is enough.
+let RR_EDIT = null;
+
+function beginReviewerEdit(repo, menu) {
+  const current = new Set(
+    [...menu.querySelectorAll(".rr-opt.on")].map((b) => b.dataset.reviewer)
+  );
+  RR_EDIT = { repo, number: Number(menu.dataset.number), menu, original: new Set(current), current };
+}
+
+// Send the accumulated diff. Called from closeAllMenus, so every close path — the caret,
+// clicking outside, opening another menu — applies rather than silently discarding.
+function flushReviewerEdits() {
+  const ed = RR_EDIT;
+  RR_EDIT = null;
+  if (!ed) return;
+  const add = [...ed.current].filter((h) => !ed.original.has(h));
+  const remove = [...ed.original].filter((h) => !ed.current.has(h));
+  if (!add.length && !remove.length) return;
+  const r = (STATE.model.repos || []).find((x) => x.name === ed.repo);
+  if (!r) return;
+  const pr = (r.openPRs || []).find((p) => p.number === ed.number);
+  const chip = ed.menu.closest(".rr-dd") && ed.menu.closest(".rr-dd").querySelector(".rr-chip");
+  if (chip) { chip.disabled = true; chip.textContent = "Saving…"; }
+
+  // Apply the diff locally and repaint NOW rather than waiting on the round trip. We know
+  // exactly what we're asking for, and waiting for the response left the 👀 badge showing
+  // a reviewer that had already been removed: the server answers `reviewers: null` whenever
+  // the PR isn't in its model cache, and the old code's `data.reviewers || pr.reviewers`
+  // then quietly kept the stale list until a full page reload.
+  const display = (h) => String(h).split("/").pop();
+  const before = pr ? (pr.reviewers || []).slice() : null;
+  const beforeDecision = pr ? pr.reviewDecision : null;
+  const applyLocal = (list) => {
+    if (!pr) return;
+    pr.reviewers = list;
+    // Clear the decision when nobody is left, or the next poll re-renders a review badge
+    // for a PR that no longer has a reviewer.
+    if (!pr.reviewers.length) pr.reviewDecision = null;
+    else if (!pr.reviewDecision) pr.reviewDecision = "REVIEW_REQUIRED";
+    // The CI poll overwrites reviewers from a live GitHub read every 10s. GitHub's read
+    // side can still be serving the pre-edit set, which would flip the badge back moments
+    // after we fixed it — so hold the poll off this PR's reviewers briefly.
+    pr._reviewersEditedAt = Date.now();
+  };
+  const gone = new Set(remove.map(display));
+  applyLocal([...new Set([...(before || []).filter((x) => !gone.has(x)), ...add.map(display)])]);
+  scheduleRender();
+
+  postJSON("/api/request-review", { repo: ed.repo, number: ed.number, add, remove })
+    .then((data) => {
+      // Only trust an actual array — `null` means the server couldn't confirm, and our
+      // optimistic state is the better guess.
+      if (Array.isArray(data.reviewers)) { applyLocal(data.reviewers); scheduleRender(); }
+    })
+    .catch((e) => {
+      if (pr) { pr.reviewers = before; pr.reviewDecision = beforeDecision; } // put it back
+      scheduleRender();
+      alert("Couldn't update reviewers: " + e.message);
+    });
 }
 function toggleMenu(e, trigger) {
   e.stopPropagation();
@@ -1979,7 +2180,7 @@ const TAB_INTROS = {
   monitored: "Inactive-client repos you watch but don't patch — email the client, then mark them notified.",
   notified: "Monitored repos whose client has already been emailed about these vulnerabilities.",
   ignored: "Repos that are out of scope for this tool.",
-  untriaged: "New repos with alerts — classify each as Maintain, Monitor, or Ignore.",
+  untriaged: "Every org repo you haven't classified yet, alerts or not — mark each Maintain, Monitor, or Ignore.",
   covered: "Maintained gems whose constraints already admit every patch — no action needed.",
   compliance: "Full SOC 2 inventory — scope each repo In or Out and track branch protection.",
   archived: "Repos archived on GitHub (read-only).",
@@ -2185,10 +2386,33 @@ function prChips(r) {
       // from the most recent PR, open or closed). Only on a NON-draft PR: GitHub doesn't
       // notify requested reviewers while a PR is a draft, so gate it behind the draft→ready
       // flip below — request a review only once the PR is actually ready for one.
-      const sr = r.suggestedReviewer;
-      const alreadyReq = sr && (pr.reviewers || []).map(String).includes(sr.display);
-      const reviewBtn = sr && !pr.draft && !alreadyReq && pr.reviewDecision !== "APPROVED"
-        ? `<button class="pr-act act-request-review" data-number="${pr.number}" data-reviewer="${esc(sr.handle)}" title="Request a review from @${esc(sr.display)} on this PR">👤 Request review from @${esc(sr.display)}</button>`
+      const rc = reviewerChoices(r, pr);
+      // Shown whenever there's anyone to pick from — not just anyone left to ADD. Gating on
+      // rc.def would hide the control once everyone is requested, which is exactly when you
+      // need it to remove someone. The chip then falls back to the first name, disabled.
+      const rcLead = rc.def || rc.opts[0];
+      const reviewBtn = rcLead && !pr.draft && pr.reviewDecision !== "APPROVED"
+        ? `<span class="pr-act rr">` +
+          `<span class="rr-label">👤 Request review from</span>` +
+          `<span class="dd rr-dd">` +
+          (rc.def
+            ? `<button class="rr-chip act-request-review" data-number="${pr.number}" data-reviewer="${esc(rc.def.handle)}" title="Request a review from @${esc(rc.def.display)} on this PR">@${esc(rc.def.display)}</button>`
+            : `<button class="rr-chip" disabled title="Everyone here is already requested — use ▼ to remove someone">@${esc(rcLead.display)}</button>`) +
+          `<button class="dd-trigger rr-caret" data-open title="Add or remove reviewers">▼</button>` +
+          `<div class="dd-menu rr-menu" data-number="${pr.number}" hidden>` +
+          `<div class="menu-section">${rc.fromHistory ? "Reviewed this repo" : `${esc(STATE.model.org || "org")} members`}</div>` +
+          rc.opts
+            .map(
+              (o) =>
+                `<button class="rr-opt${o.requested ? " on" : ""}" data-reviewer="${esc(o.handle)}" aria-pressed="${o.requested}" title="Click to ${o.requested ? "remove" : "request"} @${esc(o.display)} — applied when you close this menu">` +
+                `<span class="rr-tick">${o.requested ? "✓" : ""}</span>` +
+                `<span class="rr-who">@${esc(o.display)}</span>` +
+                (o.isTeam ? `<span class="rr-hint">team</span>` : "") +
+                `</button>`
+            )
+            .join("") +
+          `<div class="rr-foot">Applied when this menu closes</div>` +
+          `</div></span></span>`
         : "";
       const readyBtn = pr.draft
         ? `<button class="pr-act act-ready-pr" data-number="${pr.number}" title="Mark this draft PR as ready for review on GitHub">Mark ready for review</button>`
@@ -2270,7 +2494,12 @@ async function pollPRStatus(refresh) {
         if (!metas || !r.openPRs) continue;
         for (const pr of r.openPRs) {
           const m = metas.find((x) => x.number === pr.number);
-          if (m) { pr.draft = m.draft; pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
+          // Skip reviewers (and the decision derived from them) for a few seconds after a
+          // local edit: this comes from a live GitHub read that can still be serving the
+          // pre-edit set, which would flip the badge back right after we changed it.
+          const justEdited = pr._reviewersEditedAt && Date.now() - pr._reviewersEditedAt < 20000;
+          if (m && !justEdited) { pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; }
+          if (m) { pr.draft = m.draft; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
         }
       }
     }
@@ -3254,15 +3483,34 @@ async function onFixCI(r) {
   }
 }
 
+// Who the "Request review" control offers for one PR. The repo's OWN history leads
+// (most-recent-first, so the person you usually ask is the default); a repo nobody has
+// reviewed yet has no history to suggest from, so it falls back to the org roster rather
+// than showing nothing. Anyone already requested on THIS PR is flagged, not hidden — the
+// menu shows them ticked so it's clear why they aren't offered, and the default skips to
+// the first person who could still be asked.
+function reviewerChoices(r, pr) {
+  const already = new Set((pr.reviewers || []).map(String));
+  const history = r.reviewerOptions || [];
+  const fromHistory = history.length > 0;
+  const pool = fromHistory ? history : ((STATE.model && STATE.model.orgMembers) || []);
+  const opts = pool.map((o) => ({ ...o, requested: already.has(o.display) }));
+  return { opts, fromHistory, def: opts.find((o) => !o.requested) || null };
+}
+
 // One-click "request review from @who" on a single PR (who = r.suggestedReviewer,
 // resolved server-side). Reflects the request in the model + re-renders, no Refresh.
-async function onRequestReview(r, btn) {
+// `btn` carries the choice (data-number / data-reviewer); `busyEl` is where to show it
+// working. They differ when the click came from the dropdown — that menu item is hidden
+// the moment the menu closes, so the feedback belongs on the chip that stays visible.
+async function onRequestReview(r, btn, busyEl) {
   const number = Number(btn.dataset.number);
   const reviewer = btn.dataset.reviewer;
   const display = reviewer.split("/").pop();
-  btn.disabled = true;
-  const old = btn.innerHTML;
-  btn.textContent = "Requesting…";
+  const target = busyEl || btn;
+  target.disabled = true;
+  const old = target.innerHTML;
+  target.textContent = "Requesting…";
   try {
     const data = await postJSON("/api/request-review", { repo: r.name, number, reviewer });
     const pr = (r.openPRs || []).find((p) => p.number === number);
@@ -3272,8 +3520,8 @@ async function onRequestReview(r, btn) {
     }
     scheduleRender();
   } catch (e) {
-    btn.disabled = false;
-    btn.innerHTML = old;
+    target.disabled = false;
+    target.innerHTML = old;
     alert("Couldn't request review: " + e.message);
   }
 }
@@ -3441,6 +3689,27 @@ function card(r, nesting) {
     b.addEventListener("click", () => copyRich(anchorHtml(b.dataset.url, b.dataset.label), b.dataset.url, b))
   );
   el.querySelectorAll(".act-request-review").forEach((b) => b.addEventListener("click", () => onRequestReview(r, b)));
+  // Opening the picker snapshots who's currently requested, so the close can diff against it.
+  el.querySelectorAll(".rr-caret").forEach((c) =>
+    c.addEventListener("click", () => {
+      const menu = c.parentElement.querySelector(".rr-menu");
+      if (menu && !menu.hidden) beginReviewerEdit(r.name, menu); // toggleMenu already ran
+    })
+  );
+  // Ticking a name only edits local state — the batch is sent by closeAllMenus.
+  el.querySelectorAll(".rr-opt[data-reviewer]").forEach((b) =>
+    b.addEventListener("click", (e) => {
+      e.stopPropagation(); // keep the menu open; this is an editor, not an action list
+      if (!RR_EDIT) return;
+      const handle = b.dataset.reviewer;
+      const on = !RR_EDIT.current.has(handle);
+      if (on) RR_EDIT.current.add(handle);
+      else RR_EDIT.current.delete(handle);
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+      b.querySelector(".rr-tick").textContent = on ? "✓" : "";
+    })
+  );
   el.querySelectorAll(".act-ready-pr").forEach((b) => b.addEventListener("click", () => onReadyForReview(r, b)));
   // Per-PR buttons: bind EACH (a card can hold several PRs) and pass the button so the
   // handler reads the right data-number — `on()` only binds the first match + passes the card.
@@ -3724,12 +3993,21 @@ function jobBusyHtml(status, kind) {
 let _renderTimer = null;
 function scheduleRender() {
   if (_renderTimer) return;
-  _renderTimer = setTimeout(() => {
+  // A poll-driven rebuild replaces the cards wholesale, which yanks an open dropdown out
+  // of the DOM mid-interaction: the CI poll fires every 10s, so opening the reviewer picker
+  // shortly after a CI/review change would see it vanish, then "work" on the second try
+  // once the snapshot settled. Worse for the picker specifically — it holds ticks that
+  // haven't been applied yet, so the rebuild would silently discard them. So wait for the
+  // menu to close instead of dropping the update; re-arming keeps the refresh pending
+  // however long it stays open.
+  const attempt = () => {
+    if (document.querySelector(".dd-menu:not([hidden])")) { _renderTimer = setTimeout(attempt, 300); return; }
     _renderTimer = null;
     const y = window.scrollY;
     render();
     window.scrollTo(0, y);
-  }, 180);
+  };
+  _renderTimer = setTimeout(attempt, 180);
 }
 
 // Single list of the card actions toggled while a job runs, so the disable

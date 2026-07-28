@@ -229,9 +229,15 @@ once — *maintained*, *monitored*, or *ignored* — and that choice (persisted 
 and which actions it gets. Classification is purely local triage: unlike
 **Archive**, it changes nothing on GitHub.
 
+Two tabs are about a *decision* rather than about vulnerabilities, so they also cover
+repos with **no** open alerts (which never reach the alert feed at all): **Untriaged**
+shows every unclassified repo in the org, and **Ignored** shows every ignored one.
+Those alert-free repos come from the same full-org inventory the Compliance tab uses,
+and render as compact rows below the alerted cards.
+
 | Tab | What lands here |
 | --- | --- |
-| **Untriaged** | Not yet classified — the triage inbox. Hidden when empty. |
+| **Untriaged** | Not yet classified — the triage inbox, covering **every** non-archived org repo, alerts or not. Hidden when empty. |
 | **Maintained** | Active client / we host — repos we actually patch. |
 | **Pending PR** | Has an open tool-opened PR whose CI is still running, failing, or being fixed. Takes precedence over every other tab, whatever the classification. |
 | **Passing PR** | Has an open tool-opened PR with **green CI** but no approval yet — awaiting review. Hidden when empty. |
@@ -239,7 +245,7 @@ and which actions it gets. Classification is purely local triage: unlike
 | **Covered** | A maintained **gem** whose constraints already permit every patch — no action needed. Hidden when empty. |
 | **Monitored** | Inactive client we watch but don't patch — we notify them instead. |
 | **Notified** | A monitored repo whose client we've emailed, with no new advisories since. |
-| **Ignored** | Out of scope for this tool. |
+| **Ignored** | Out of scope for this tool — including ignored repos with no open alerts. |
 | **🛡 Compliance** | A *separate* full-org inventory — **every** non-archived repo, not just alerted ones — for the SOC 2 scope decision + branch protection. See [below](#branch-protection--the-compliance-inventory). |
 
 An open tool PR flows through three lifecycle tabs as it progresses —
@@ -249,7 +255,9 @@ to merging. Archived repos drop out of GitHub's alert feed entirely, so there's 
 archived tab. The headline **"to maintain"** count is Maintained + Pending + Passing
 + Approved (open PRs still count as work until merged) — covered gems and everything
 monitored/ignored are excluded. Triage buttons sit on each card in
-the **Untriaged** tab; elsewhere they move into a per-card menu. Marking a
+the **Untriaged** tab; elsewhere they move into a per-card menu. To classify a whole
+org's backlog, select rows there (`x`, or `*` for all) and press `m` / `w` / `i` —
+Maintain / Monitor / Ignore, the same mnemonics the Compliance tab uses. Marking a
 *monitored* repo notified moves it Monitored → Notified, and a **new** advisory
 appearing afterward sends it back to Monitored.
 
@@ -480,6 +488,28 @@ A PR that's **behind** its base or **conflicting** shows a Rebase button. It lau
 headless session that merges the base in, regenerates the lockfile, resolves conflicts, and
 pushes — CI then re-runs. (`createRebasePR` in `lib/rollup.js`, `/api/rebase`.)
 
+### 👤 Request review
+
+A ready (non-draft, unapproved) PR shows **Request review from @who** — a static label plus
+a name chip with a **▼** caret. Clicking the chip requests that person immediately.
+
+The caret opens a **picker, not a menu of actions**: names tick and untick, and the whole diff
+is sent as one `gh pr edit --add-reviewer … --remove-reviewer …` when the menu closes (every
+close path funnels through `closeAllMenus`). Applying per click would fire a request per
+toggle, and an accidental untick would un-request someone with no chance to put them back
+before the menu shut. A close with no changes sends nothing.
+
+The default is the person you normally ask on **that repo**: reviewers are collected from its
+last 30 PRs, open and closed, most-recent-first — whoever was requested, else whoever actually
+reviewed. Anyone already requested is ticked, and the chip's default skips past them, so a PR
+that already has one reviewer can still get a second. Once everyone is requested the chip goes
+inert but the caret stays live — otherwise there'd be no way to remove anyone.
+
+A repo nobody has reviewed yet has no history to suggest from, so the picker falls back to the
+**org roster** (`/orgs/{org}/members`, cached an hour). The authed user is filtered out of both
+lists — every tool PR is authored by them, and GitHub rejects a self-review request. Teams are
+supported and requested as `org/slug`.
+
 ### 💬 Review console (Copilot + reviewer comments)
 
 A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
@@ -562,6 +592,14 @@ forever: capped at **2 attempts per commit** (`claudeFix.maxAttemptsPerSha`) and
 CI** button (`POST /api/autofix`); start one by hand any time with **Fix CI now**
 (`POST /api/fix-ci`), which works regardless of the toggle.
 
+The per-repo cap exists to stop a fix→new-SHA→fail runaway, so the poller **releases it
+once that chain has ended** — either when every open PR on a repo is passing (none
+failing, none still running, at least one actually green), or when the repo has no open
+tool PR at all, meaning the work merged or was closed. Otherwise the budget only ever
+counts down: a repo where the fixer *worked* four times would be capped exactly like one
+where it never worked, and attempts spent on a PR that has since merged would count
+against it forever. The per-commit cap still bounds any single SHA.
+
 ### EOL auto-upgrade — `autoUpgradeEOL`
 When an end-of-life runtime turns up on a **maintained** repo, the runtime-upgrade PR
 above opens **automatically** (deduped per repo + runtime + target version in
@@ -578,6 +616,64 @@ loop to green the breaking upgrade.
 SOC 2 change-management (CC8.1) wants every in-scope repo's default branch protected —
 no merge without review — plus an auditable record of *which* repos are in scope. Two
 features cover that.
+
+### ⚠ Dependabot silent — when the alert feed is lying
+
+Dependabot failing is not the problem; Dependabot failing **quietly** is. Every way it dies
+looks the same from outside — the updater goes quiet, with no error, no PR, and a green tick
+on the last job it ran. The Compliance tab checks for two of them.
+
+#### ⏱ Idle — a configured ecosystem stopped running
+
+The blunt question: this repo asks for weekly `hex` updates, so when did a version-update
+job for `hex` last actually run? An ecosystem quiet for more than **2× its interval (plus a
+day)** gets flagged. That catches every cause at once — `open-pull-requests-limit` reached,
+GitHub pausing a schedule, or a persistent job error — without needing to model any of them.
+
+Costs one `gh run list` per repo, no log downloads. Two details matter: dependabot.yml names
+ecosystems differently from the job labels (`mix` → **`hex`**, `npm` → `npm_and_yarn`,
+`gomod` → `go_modules`), and **security** jobs are excluded — they're alert-driven and keep
+firing after the scheduled ones have stopped, so counting them as liveness would mask
+exactly the failure being looked for.
+
+Real example: a repo whose `hex` updates stopped for 105 days because it had hit the default
+`open-pull-requests-limit: 5`. Its `github-actions` ecosystem (3 open PRs) kept running the
+whole time, and its npm *security* jobs did too — so from the Actions tab it looked alive.
+
+#### ⚠ Blocked — an unreachable git dependency
+
+A dependency pulled straight from a git repo (`gem "x", github: "org/x"`,
+`"pkg": "github:org/pkg"`) has to be **cloneable** during resolution. If Dependabot can't
+reach it, the resolver can't build the dependency graph at all — so **every** dependency
+in that project silently stops updating, not just the unreachable one. The update job
+still reports *success*; there's simply no PR and no alert.
+
+That makes it the same class of blind spot as [Hex](#hex--elixir-scanning): the repo
+looks clean because nothing scanned it. Observed on a real repo where one unreachable
+git gem blocked all 28 gems that needed an update — security updates included — for six
+weeks, with nothing in the UI to show for it.
+
+Affected repos get a red **⚠ dependabot blocked** badge (idle ones get an amber
+**⏱ dependabot idle**), a **⚠ Dependabot silent** filter appears covering both, and each
+cause gets its own banner — same symptom, different fix, so merging them would muddle both.
+Blocked outranks idle on a repo that's somehow both: the unreachable dep is usually the
+*cause* of the silence and names a concrete fix. Detection is predictive rather than log-scraping — it
+reads each repo's manifests plus the org's Dependabot access policy
+(`GET /orgs/{org}/dependabot/repository-access`), so it fires the moment someone *adds*
+a private git dep rather than after a run has already failed, and it can name the fix.
+A dep whose visibility can't be determined is treated as reachable: a false "your
+scanning is broken" would train you to ignore the badge.
+
+**The fix is an org setting**, not something the dashboard can apply: Settings → Code
+security → *Dependabot private repository access*, granting the named repo. Via the API:
+
+```bash
+gh api --method PATCH /orgs/<org>/dependabot/repository-access \
+  -F 'repository_ids_to_add[]=<repo-id>'
+```
+
+Repo *visibility* is not the issue — private projects get Dependabot fine. Only the
+git-sourced **dependency** needs to be reachable.
 
 ### Protect branch (rulesets)
 Any repo whose default branch has **no** protection shows a **🔓 unprotected** banner
