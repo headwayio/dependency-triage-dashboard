@@ -35,24 +35,49 @@ const fail = (msg) => { process.stderr.write(msg.endsWith("\n") ? msg : msg + "\
 const REPO = "data-pipeline";
 const TOOL_BRANCH = "dependency-updates/soc2-2026-07-20";
 
-// One PR per state the merge route has to distinguish. `number` doubles as the test's handle.
+// One PR per state the routes have to distinguish. `number` doubles as the test's handle.
+// Shared by `pr view` and `pr list`, so a PR can't behave one way when inspected and another
+// when listed — a divergence there would let a test pass against a contradiction.
 const PRS = {
   57: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", headRefName: TOOL_BRANCH,
         title: "Bump cryptography + jinja2" },
   58: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", headRefName: "feature/checkout-redesign",
-        title: "Human feature work" },                      // not a tool branch — must be refused
+        title: "Human feature work" },                      // not a tool branch — never touch it
   59: { state: "MERGED", isDraft: false, reviewDecision: "APPROVED", headRefName: "dependency-updates/soc2-2026-07-01",
         title: "Already merged" },
   60: { state: "OPEN", isDraft: false, reviewDecision: "CHANGES_REQUESTED", headRefName: "dependency-updates/soc2-2026-07-25",
         title: "Contested bump" },
   61: { state: "OPEN", isDraft: true, reviewDecision: "APPROVED", headRefName: "dependency-updates/soc2-2026-07-26",
         title: "Draft bump" },
+  90: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "dependency-updates/soc2-2026-07-21",
+        title: "Stacked bump", baseRefName: TOOL_BRANCH },
+  300: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "release/deps-2026-07-01",
+         title: "Release rollup" },                         // a rollup is not a rollup INPUT
 };
 for (const [n, pr] of Object.entries(PRS)) {
   pr.number = Number(n);
-  pr.baseRefName = "main";
+  pr.baseRefName = pr.baseRefName || "main";
   pr.url = `https://github.com/${ORG}/${REPO}/pull/${n}`;
+  pr.createdAt = `2026-07-${String(10 + (Number(n) % 20)).padStart(2, "0")}T00:00:00Z`;
 }
+
+// Which PRs are OPEN on the repo, per scenario. Order here is gh's listing order, so a route
+// that reorders (rollup honors the caller's merge order) can be caught doing it.
+const OPEN_PRS = {
+  default: [57],
+  "tool-child": [90, 57],
+  // Every category the rollup filter must reject, alongside two it must accept.
+  "rollup-mix": [57, 90, 58, 60, 61, 300],
+  "rollup-one": [57],
+  "release-pr-open": [57, 90], // two eligible, so the route proceeds and the JOB does the skipping
+  "slow-clone": [90, 57],      // pairs with the stalling clone below, for the concurrency test
+};
+const listFor = (s) => (OPEN_PRS[s] || OPEN_PRS.default).map((n) => ({
+  ...PRS[n],
+  isDraft: PRS[n].isDraft,
+  reviewRequests: [],
+  files: [{ path: "requirements.txt" }, { path: "poetry.lock" }],
+}));
 
 // What `gh repo view --json <merge flags>` reports. "unreadable" exits non-zero so the route's
 // can't-tell fallback is exercised; "none-allowed" answers with every method disabled, which is
@@ -105,20 +130,40 @@ if (is("pr", "list") && argv.includes("--base")) {
   out(child && base === TOOL_BRANCH ? [{ number: child }] : []);
 }
 
+// `pr list --head release/deps-…` is the rollup's "is a release PR already open?" guard.
+// It must answer EMPTY by default: falling through to the general listing below would hand
+// back an unrelated PR, the rollup would read it as an existing release and skip itself, and
+// every rollup test would silently pass without testing a rollup.
+if (is("pr", "list") && argv.includes("--head")) {
+  const head = argv[argv.indexOf("--head") + 1];
+  out(scenario === "release-pr-open" && head.startsWith("release/deps-")
+    ? [{ number: 300, url: `https://github.com/${ORG}/${REPO}/pull/300` }]
+    : []);
+}
+
+// A rollup/consolidate/rebase job clones before doing anything, so the stub has to leave a
+// real repository behind or the job dies on its first git call and never reaches the logic
+// under test. An empty `git init` is enough: branch creation works, and the per-PR fetches
+// then fail against the absent remote, which is the path that logs each PR in order and
+// aborts before any Claude session.
+if (is("repo", "clone")) {
+  const dest = argv[3];
+  // Hold the job open long enough that a test about concurrent requests doesn't depend on
+  // winning a race with it. Without this the assertion is "the second request arrives before
+  // the first job finishes", which is true in practice and therefore a latent flake.
+  if (scenario === "slow-clone") {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+  }
+  try {
+    fs.mkdirSync(dest, { recursive: true });
+    require("child_process").execFileSync("git", ["init", "-q", dest], { stdio: "ignore" });
+  } catch (e) { fail(`stub clone failed: ${e.message}`); }
+  out(`Cloning into '${dest}'...\n`);
+}
+
 if (is("pr", "list")) {
   if (joined.includes("--state all")) out([]); // reviewer-history lookup
-  const stacked = STACK_CHILD[scenario] === 90
-    ? [{ number: 90, url: "https://example.test/90", isDraft: false, createdAt: "2026-07-21T00:00:00Z",
-         headRefName: "dependency-updates/soc2-2026-07-21", baseRefName: TOOL_BRANCH,
-         title: "Stacked bump", reviewDecision: null, reviewRequests: [],
-         files: [{ path: "requirements.txt" }] }]
-    : [];
-  out([...stacked, {
-    number: 57, url: PRS[57].url, isDraft: false, createdAt: "2026-07-20T00:00:00Z",
-    headRefName: TOOL_BRANCH, baseRefName: "main", title: PRS[57].title,
-    reviewDecision: "APPROVED", reviewRequests: [],
-    files: [{ path: "requirements.txt" }, { path: "poetry.lock" }],
-  }]);
+  out(listFor(scenario));
 }
 
 if (is("pr", "view")) {
