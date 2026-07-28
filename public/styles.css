@@ -598,6 +598,14 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
    not wear it (a green ✓ pill reads as "this PR IS ready", not "click to mark it ready"). */
 .pr-act { white-space: nowrap; font-size: 12px; padding: 3px 10px; border-radius: 6px; }
 .pr-act:disabled { opacity: 0.6; }
+/* Merge is the finishing action on an approved PR, so it's the one .pr-act that takes the
+   filled accent treatment (like Fix CI) — everything else in that slot is a step on the way.
+   Deliberately blue and not green, for the reason above: green here is the "checks passing"
+   status color, and a green button would read as a state ("this IS merged") rather than an
+   action. Blocked → it loses the fill, so an inert control can't out-shout the live buttons
+   beside it (its tooltip carries what to do instead). */
+.pr-act.merge:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.pr-act.merge:not(:disabled):hover { background: #4090ff; }
 
 /* Request-review control: static label + a chip/caret pair that reads as one button.
    The label is text, not part of the hit area — only the name and the caret are clickable,

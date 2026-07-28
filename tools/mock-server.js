@@ -368,8 +368,10 @@ const STATIC = {
   "/styles.css": ["public/styles.css", "text/css; charset=utf-8"],
 };
 
-const json = (res, obj) => {
-  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+// `status` matters for the error paths: the client branches on res.ok, so a refusal sent as
+// 200 with an {error} body would be read as success.
+const json = (res, obj, status = 200) => {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
 };
 
@@ -407,6 +409,20 @@ http.createServer((req, res) => {
       if (route === "/api/scope-override") return json(res, { repo: b.repo, scope: b.scope || "out", override: b.scope ? { scope: b.scope, reason: b.reason } : null, derived: "out" });
       if (route === "/api/protect-branch") return json(res, { repo: b.repo, branch: "main", updated: false, rulesetId: 1 });
       if (route === "/api/unprotect-branch") return json(res, { repo: b.repo, removed: true, stillProtected: false, via: null });
+      // Merge actually removes the PR from this process's model (and from the poll's prMeta),
+      // like the real server drops it from its cache — a canned ok would leave the merged PR
+      // sitting in the Approved tab on the next poll, which is exactly the bug worth catching.
+      if (route === "/api/merge-pr") {
+        const repo = repos.find((x) => x.name === b.repo);
+        const num = Number(b.number);
+        const pr = repo && (repo.openPRs || []).find((p) => p.number === num);
+        if (!pr) return json(res, { error: `PR #${num} isn't open on ${b.repo}.` }, 409);
+        repo.openPRs = repo.openPRs.filter((p) => p.number !== num);
+        repo.pending = repo.openPRs.length > 0;
+        if (prMeta[b.repo]) prMeta[b.repo] = prMeta[b.repo].filter((m) => m.number !== num);
+        if (!repo.openPRs.length) delete ciStatuses[b.repo];
+        return json(res, { repo: b.repo, number: num, merged: true, method: "squash", branchDeleted: true, base: pr.baseRefName || repo.defaultBranch || "main", title: pr.title || "", url: pr.url || "" });
+      }
       // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
       // the picker renders from that response, so a canned reply would make it look broken.
       if (route === "/api/request-review") {

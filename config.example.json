@@ -20,6 +20,8 @@
   "emailHourlyRate": 200,
   "npm": { "force": false },
   "autoFixCI": false,
+  "mergeMethod": "squash",
+  "deleteBranchOnMerge": true,
   "ciPollSeconds": 10,
   "maxConcurrentUpdates": 3,
   "maxConcurrentFixes": 1,

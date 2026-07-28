@@ -1002,6 +1002,7 @@ function navAction(key) {
   if (key === "R") return kbRollup();
   if (key === "c") return kbReviewComments();
   if (key === "m") return kbReadyForReview();
+  if (key === "M") return kbMergePR();
   if (key === "a") return kbRequestReview();
 }
 // Repos a bulk action targets: the selection if any, else the cursor row.
@@ -1111,6 +1112,19 @@ function kbReadyForReview() {
   if (!pr) { toast("No draft PR on this repo to mark ready."); return; }
   const btn = (cardEl(r.name) || document).querySelector(`.act-ready-pr[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number) } };
   onReadyForReview(r, btn);
+}
+// Merge the cursor repo's first APPROVED PR that nothing is blocking. When every approved PR
+// is blocked, say why for the first of them — a silent no-op would read as a broken key, and
+// the reason (conflicts, a stack, protection) is the same text its disabled button carries.
+function kbMergePR() {
+  const r = cursorRepo();
+  if (!r) return;
+  const approved = (r.openPRs || []).filter((p) => p.reviewDecision === "APPROVED");
+  if (!approved.length) { toast("No approved PR on this repo to merge."); return; }
+  const pr = approved.find((p) => !mergeBlockedReason(p, r));
+  if (!pr) { toast(`#${approved[0].number}: ${mergeBlockedReason(approved[0], r)}`); return; }
+  const btn = (cardEl(r.name) || document).querySelector(`.act-merge-pr[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number) } };
+  onMergePR(r, btn);
 }
 function kbRequestReview() {
   const r = cursorRepo();
@@ -1404,6 +1418,7 @@ function showShortcutHelp() {
       [k("R"), "roll up ready PRs into one release PR"],
       [k("c"), "review comments (first PR with feedback)"],
       [onUntriaged ? "" : k("m"), onUntriaged ? "" : "mark a draft PR ready for review"],
+      [k("M"), "merge an approved PR (first mergeable one)"],
       [k("a"), "assign / request review (first eligible PR)"],
       [k("p"), "protect the branch"],
       [k("f"), "fix failing CI"],
@@ -1438,8 +1453,8 @@ function toast(msg) {
 function tabActionKeys() {
   if (STATE.tab === "compliance") return "e#rpmwi";
   // Untriaged adds the Track-as keys (w/i) and rebinds m to Maintain — see navAction.
-  if (STATE.tab === "untriaged") return "e#rupfURcamwi";
-  return "e#rupfURcma";
+  if (STATE.tab === "untriaged") return "e#rupfURcamwiM";
+  return "e#rupfURcmaM";
 }
 // Two-stage search Esc: the input's first Esc blurs + arms this window; a second Esc
 // shortly after clears the kept term. Placed before the compRows guard so it still works
@@ -2359,6 +2374,37 @@ function consolidationBanner(r) {
   );
 }
 
+// Why an approved PR can't be merged right now, or null when it can. GitHub's
+// mergeStateStatus is the authority: DIRTY = conflicts with the base, BEHIND = the base moved
+// and the repo requires branches to be up to date, BLOCKED = branch protection isn't
+// satisfied yet (a required check, an unresolved conversation, another approval).
+// CLEAN / HAS_HOOKS / UNSTABLE all merge. An UNKNOWN or absent status (GitHub hasn't computed
+// it yet, or a server too old to poll it) is NOT treated as blocked — the attempt goes through
+// and GitHub's own answer is what the user sees.
+// Open PRs stacked ON this one (their base is its head branch) — the inverse of
+// stackParentNumber. Only sees this tool's PRs, so it's for the heads-up in the confirm
+// dialog; the server re-asks GitHub (which also sees human PRs) before choosing how to merge.
+function stackChildNumbers(pr, r) {
+  const head = pr.headRefName;
+  if (!head) return [];
+  return (r.openPRs || []).filter((p) => p.number !== pr.number && p.baseRefName === head).map((p) => p.number);
+}
+
+function mergeBlockedReason(pr, r) {
+  if (pr.draft) return "This PR is still a draft — mark it ready for review first.";
+  const parent = stackParentNumber(pr, r);
+  if (parent) return `Stacked on #${parent} — this targets that PR's branch, so merging it now wouldn't reach the base. Merge #${parent} first; GitHub then retargets this one.`;
+  if (pr.mergeStateStatus === "DIRTY" || pr.mergeable === "CONFLICTING") return "This branch conflicts with its base — resolve it with ⟳ Rebase & resolve first.";
+  if (pr.mergeStateStatus === "BEHIND") return "This branch is behind its base and the repo requires branches to be up to date — use ⟳ Update branch first.";
+  if (pr.mergeStateStatus === "BLOCKED") {
+    const n = pr.reviewUnresolved || 0;
+    return n > 0
+      ? `GitHub is blocking the merge — ${n} unresolved review comment${n === 1 ? "" : "s"}. Clear ${n === 1 ? "it" : "them"} with 💬 Review.`
+      : "GitHub is blocking the merge — a required check or review isn't satisfied yet. Open the PR to see which.";
+  }
+  return null;
+}
+
 function prChips(r) {
   if (!r.openPRs || !r.openPRs.length) return "";
   // On a PR-lifecycle tab, show only this repo's PRs in that state — the per-PR split. The
@@ -2434,12 +2480,23 @@ function prChips(r) {
       const reviewCommentsBtn = rvN > 0
         ? `<button class="pr-act act-review-comments" data-number="${pr.number}" title="${rvN} unresolved review comment${rvN === 1 ? "" : "s"} (Copilot + reviewers) — open the review console to triage, fix, reply &amp; resolve">💬 Review ${rvN}</button>`
         : "";
+      // The finishing move, on an APPROVED PR only — the Approved tab's whole point. When
+      // something stands in the way (conflicts, a stack, branch protection) the button stays
+      // visible but disabled, saying what to do instead: a merge that GitHub would reject is
+      // better refused here, with the fix named, than fired off to come back as an error.
+      const mergeWhy = pr.reviewDecision === "APPROVED" ? mergeBlockedReason(pr, r) : null;
+      const mergeBtn = pr.reviewDecision !== "APPROVED"
+        ? ""
+        : mergeWhy
+          ? `<button class="pr-act merge" data-number="${pr.number}" disabled title="${esc(mergeWhy)}">🔀 Merge</button>`
+          : `<button class="pr-act merge act-merge-pr" data-number="${pr.number}" title="Merge this approved PR into ${esc(pr.baseRefName || r.defaultBranch || "its base")} on GitHub — squash where the repo allows it, then clean up the branch">🔀 Merge</button>`;
       const right =
         fixBtn +
         rebaseBtn +
         reviewCommentsBtn +
         reviewBtn +
         readyBtn +
+        mergeBtn +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
       const title = (pr.title || "").trim();
       const titleHtml = title
@@ -3545,6 +3602,69 @@ async function onReadyForReview(r, btn) {
   }
 }
 
+// Merge one approved PR. Always confirms — a merge is irreversible, so this deliberately
+// has no "don't ask again" key, unlike Archive. The server re-reads the PR from GitHub and
+// picks a merge method the repo allows, so the outcome it reports back (method, whether the
+// branch went) is what the toast states rather than what we assumed here.
+async function onMergePR(r, btn) {
+  const number = Number(btn.dataset.number);
+  const pr = (r.openPRs || []).find((p) => p.number === number);
+  const base = (pr && pr.baseRefName) || r.defaultBranch || "the base branch";
+  const ciState = pr && pr.ci && pr.ci.state;
+  // Approval doesn't imply green: an approved PR can still be sitting on failing or
+  // in-flight checks. Say so in the modal (and make it a red confirm) rather than letting a
+  // one-word button quietly ship a red build.
+  const ciNote =
+    ciState === "failing"
+      ? `\n\n⚠️ Checks are FAILING on this PR${pr.ci.failing && pr.ci.failing.length ? ` (${pr.ci.failing.join(", ")})` : ""} — merging anyway ships a red build.`
+      : ciState === "pending"
+        ? "\n\nChecks are still running — merging now doesn't wait for them."
+        : "";
+  // Bottom of a stack: squashing would rewrite the commits the PRs above are built on and
+  // strand them, so this merges as a merge commit and keeps the branch. Say so up front —
+  // it's a visible departure from "squash and delete the branch".
+  const kids = pr ? stackChildNumbers(pr, r) : [];
+  const stackNote = kids.length
+    ? `\n\n🥞 ${kids.map((n) => "#" + n).join(", ")} ${kids.length === 1 ? "is" : "are"} stacked on this one, so it merges as a merge commit (not a squash) and keeps the branch — squashing would rewrite the commits ${kids.length === 1 ? "that PR is" : "those PRs are"} built on.`
+    : "";
+  const ok = await confirmModal({
+    message:
+      `Merge PR #${number} into ${base}?\n\n` +
+      `${r.nameWithOwner || r.name}${pr && pr.title ? ` · ${pr.title}` : ""}\n\n` +
+      (kids.length
+        ? `Merges it on GitHub. Branch protection still applies — this never bypasses it.`
+        : `Merges it on GitHub (squash where the repo allows it) and deletes the branch. Branch protection still applies — this never bypasses it.`) +
+      stackNote +
+      ciNote,
+    danger: ciState === "failing",
+    confirmLabel: "Merge PR",
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.textContent = "Merging…";
+  try {
+    const data = await postJSON("/api/merge-pr", { repo: r.name, number });
+    // Drop the merged PR locally so the card leaves the Approved tab immediately — the same
+    // move the server just made to its cache, so the next poll agrees instead of resurrecting it.
+    r.openPRs = (r.openPRs || []).filter((p) => p.number !== number);
+    r.pending = r.openPRs.length > 0;
+    const how = { squash: "Squash-merged", merge: "Merged", rebase: "Rebase-merged" }[data.method] || "Merged";
+    // The server's stack check queries GitHub, so it sees children the model can't (a human's
+    // branch based on ours). When it kept the branch for one, say so — otherwise "merged" reads
+    // as if the usual delete-the-branch cleanup happened, and it deliberately didn't.
+    const kept = !data.branchDeleted && (data.stackedChildren || []).length
+      ? ` · branch kept for ${data.stackedChildren.map((n) => "#" + n).join(", ")}`
+      : "";
+    toast(`✓ ${how} #${number} into ${data.base || base}${kept}${r.pending ? "" : " — Refresh to re-scan this repo's alerts"}`);
+    scheduleRender();
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = old;
+    alert("Couldn't merge: " + e.message);
+  }
+}
+
 // Order a tab's repos as a dependency FOREST: a repo that another repo depends on
 // is rendered indented beneath its consumer. Returns [{repo, depth, parentName}].
 // Handles multi-level nesting; a shared dependency nests under its first consumer
@@ -3715,6 +3835,7 @@ function card(r, nesting) {
   // handler reads the right data-number — `on()` only binds the first match + passes the card.
   el.querySelectorAll(".act-rebase").forEach((b) => b.addEventListener("click", () => onRebase(r, b)));
   el.querySelectorAll(".act-review-comments").forEach((b) => b.addEventListener("click", () => onOpenReviewPanel(r, b)));
+  el.querySelectorAll(".act-merge-pr").forEach((b) => b.addEventListener("click", () => onMergePR(r, b)));
   const fix = el.querySelector(".ci-fix-btn");
   if (fix) fix.addEventListener("click", () => onFixCI(r));
   el.querySelectorAll(".eol-upgrade-btn").forEach((b) => b.addEventListener("click", () => onUpgradeRuntime(r, b.dataset.id)));
