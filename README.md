@@ -741,7 +741,7 @@ git-ignored, so your settings stay local):
 | `maxConcurrentUpdates` | `3` | update/upgrade/bump jobs run at once (env `MAX_CONCURRENT_UPDATES` overrides) |
 | `maxConcurrentFixes` | `1` | CI-fix jobs run at once (a pool separate from updates) |
 | `autoFixCI` | `false` | auto-launch a headless Claude fix when a pending PR's CI fails |
-| `ciPollSeconds` | `90` | how often to poll pending PRs' CI (min 30) |
+| `ciPollSeconds` | `10` | how often to poll pending PRs' CI + review state (min 5). One GraphQL call batches every pending PR per cycle, which is what makes a cadence this fast cheap |
 | `claudeFix` | *(object)* | CI-fix session: `permissionMode`, `timeoutMinutes` (12), and attempt caps `maxAttemptsPerSha` (2) / `maxAttemptsPerRepo` (4) |
 | `autoUpgradeEOL` | `false` | auto-open a runtime-upgrade PR for **maintained** repos on an EOL runtime |
 | `eolPollHours` | `12` | how often to re-scan runtimes against endoflife.date (min 1) |
