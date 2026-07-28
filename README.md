@@ -482,6 +482,37 @@ Stacked / sequenced PRs carry a **🥞 stacked on #N** / **⏱ after #N** badge,
 stops offering to consolidate PRs that are already linked — so it's clear which way a clash
 was resolved and you can't double-apply it.
 
+### ⚠ Collisions with PRs this tool didn't open
+
+The consolidation cluster only ever considers **our own** PRs, and has to: rollup *closes* the
+originals, stack *rewrites* their branches, sequence *comments* on them, and none of that may
+reach a PR someone else owns. That safety rule left a blind spot — a human's PR changing the
+same lockfile on the same base was invisible, so the dashboard couldn't see a conflict coming
+even though it was certain.
+
+It's now flagged. `annotateForeignCollisions` (`lib/github.js`) splits the repo's open PRs
+instead of filtering them, so the ones we didn't open are still examined for a shared
+base + lockfile. Matches render as an amber row above the PR, naming the PR, its author, and
+the lockfile, with a link. **Report only** — there is no button, because there is no action
+this tool may safely take on someone else's branch. Either talk to the author, or let whoever
+merges second hit **⟳ Update branch**. Costs no extra API call: `gh pr list` already returned
+every open PR and the non-tool ones were simply being discarded.
+
+**Dependabot's own PRs are excluded**, and not just to cut noise. They collide with a
+consolidated remediation PR *by construction* — superseding them is the whole point, which is
+what `nudgeDependabotOnClear` retires them for — and Dependabot rebases its own PR when the
+base moves, so "one of you has to rebase" is never true of them. Measured on one real repo: 15
+collisions, 13 of them Dependabot. Reporting those would fire on every repo forever and bury
+the two human PRs that actually needed a conversation. At most three are shown (newest first),
+then a count.
+
+Two known limits. Lockfiles match on **basename**, so a monorepo's `web/Gemfile.lock` and
+`api/Gemfile.lock` count as the same file — inherited deliberately from the existing cluster
+logic, since matching foreign PRs by a different rule than our own would be worse. It
+over-reports rather than under-reports. And the check runs with the **model build**, not the
+10s CI poll (same as the `lockfiles` it depends on) — so a PR someone opens mid-session shows
+up on the next **Refresh**, not instantly.
+
 ### GitHub-native Stacked PRs
 
 GitHub's own [Stacked PRs](https://github.github.com/gh-stack/) (private preview since April

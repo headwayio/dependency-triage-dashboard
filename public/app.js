@@ -2381,6 +2381,57 @@ function consolidationBanner(r) {
 // CLEAN / HAS_HOOKS / UNSTABLE all merge. An UNKNOWN or absent status (GitHub hasn't computed
 // it yet, or a server too old to poll it) is NOT treated as blocked — the attempt goes through
 // and GitHub's own answer is what the user sees.
+// PRs this tool did NOT open that will collide with ours on merge — same base, same lockfile
+// (flagged in the model by annotateForeignCollisions, which sees every open PR, not just ours).
+// Report-only, deliberately: the consolidation banner's three actions all close, rewrite, or
+// comment on the PRs they touch, and none of that may reach a PR somebody else owns. So this
+// names the clash, links it, and leaves the call to the human — who can talk to the author, or
+// just let whoever merges second hit ⟳ Update branch.
+function foreignCollisionRows(r) {
+  if (!PR_TABS.has(STATE.tab)) return "";
+  // Scope to the PRs this tab is showing, like prChips — a warning about a PR that isn't on
+  // screen reads as belonging to one that is.
+  const mine = (r.openPRs || []).filter(
+    (p) => (p.collidesWith || []).length && prLifecycleState(p, r) === STATE.tab
+  );
+  if (!mine.length) return "";
+  // One row per FOREIGN PR (not per pair): with several of ours hitting the same PR, the thing
+  // to know is that #219 is in the way, once.
+  const byForeign = new Map();
+  for (const p of mine) {
+    for (const f of p.collidesWith) {
+      // Base comes from OUR PR in the pair: a collision is same-base by definition, so this is
+      // the branch they're both racing for (mine[0]'s base would be a guess once a repo has
+      // PRs on more than one base).
+      if (!byForeign.has(f.number)) byForeign.set(f.number, { f, ours: [], base: p.baseRefName });
+      byForeign.get(f.number).ours.push(p.number);
+    }
+  }
+  // A long-lived repo can have several of these at once (crows-nest had two humans plus an
+  // old Electron branch). Show the newest few and count the rest — a wall of amber rows above
+  // the PR is worse than no warning, because it stops being read.
+  const all = [...byForeign.values()].sort((a, b) => b.f.number - a.f.number);
+  const shown = all.slice(0, 3);
+  const more = all.length - shown.length;
+  return shown
+    .map(({ f, ours, base: sharedBase }) => {
+      const who = f.author ? ` by <strong>@${esc(f.author)}</strong>` : "";
+      const locks = f.lockfiles.map((l) => `<code>${esc(l)}</code>`).join(", ");
+      const base = sharedBase || r.defaultBranch || "the base";
+      const link = `<a class="eol-pr-link" href="${esc(f.url)}" target="_blank" rel="noopener" title="${esc(f.title)}">#${f.number} →</a>`;
+      return srow(
+        "warn",
+        `⚠ PR #${f.number}${who}${f.draft ? " <span class=\"pr-meta\">(draft)</span>" : ""} also changes ${locks} on <code>${esc(base)}</code> — ` +
+          `this tool didn't open it, so consolidation can't include it. Whichever of #${f.number} / ${ours.map((n) => "#" + n).join(", ")} merges second needs ⟳ Update branch.`,
+        link
+      );
+    })
+    .join("") +
+    (more
+      ? srow("warn", `⚠ …and ${more} more open PR${more === 1 ? "" : "s"} on this base ${more === 1 ? "changes" : "change"} a lockfile this one also changes.`)
+      : "");
+}
+
 // Open PRs stacked ON this one (their base is its head branch) — the inverse of
 // stackParentNumber. Only sees this tool's PRs, so it's for the heads-up in the confirm
 // dialog; the server re-asks GitHub (which also sees human PRs) before choosing how to merge.
@@ -2807,7 +2858,7 @@ function statusRows(r) {
   const rows =
     eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + kickoff +
     classifyPrompt(r) + monitoredStale(r) +
-    consolidationBanner(r) + prChips(r) + dispoBumpNote(r) +
+    consolidationBanner(r) + foreignCollisionRows(r) + prChips(r) + dispoBumpNote(r) +
     dispoCovered(r) + monitoredNotified(r);
   return rows ? `<div class="ar-status">${rows}</div>` : "";
 }

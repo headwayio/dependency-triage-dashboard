@@ -155,7 +155,11 @@ const repos = [
     language: "Python", visibility: "PRIVATE", defaultBranch: "main", pushedAt: days(3),
     published: null, dependents: [], dependsOnOrg: [],
     contact: null, notifiedAt: null, newAdvisoryCount: 0, disposition: null,
-    openPRs: [{ number: 57, url: "https://github.com/acme-corp/data-pipeline/pull/57", draft: false, reviewDecision: "APPROVED", reviewers: [] }],
+    // Approved and mergeable, but a PR this tool didn't open is racing it for the same
+    // lockfile — the foreign-collision warning (annotateForeignCollisions) renders from this.
+    openPRs: [{ number: 57, url: "https://github.com/acme-corp/data-pipeline/pull/57", draft: false, reviewDecision: "APPROVED", reviewers: [],
+      headRefName: "dependency-updates/soc2-2026-07-27", baseRefName: "main", lockfiles: ["poetry.lock"],
+      collidesWith: [{ number: 61, url: "https://github.com/acme-corp/data-pipeline/pull/61", title: "Pin transformers + retrain embeddings", draft: false, author: "priya", lockfiles: ["poetry.lock"] }] }],
     engagement: null,
   },
   {
