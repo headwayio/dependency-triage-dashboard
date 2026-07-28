@@ -782,6 +782,13 @@ function drawCompliance() {
                 (x) =>
                   `<span><code>${esc(x.repo)}</code> · ${esc(x.ecosystem)} · ` +
                   (x.ageDays == null ? "never run" : `last ran ${x.ageDays}d ago`) +
+                  // When we know the cause, lead with it — "at the limit" turns this from
+                  // "go investigate" into "merge or close those five".
+                  (x.atLimit
+                    ? ` · <strong class="stale-cause">${x.openPRs} open PRs, at the limit of ${x.prLimit}</strong>`
+                    : x.openPRs != null
+                      ? ` · ${x.openPRs} open PR${x.openPRs === 1 ? "" : "s"} of ${x.prLimit}`
+                      : "") +
                   ` <span class="muted">(${esc(x.interval)}, flagged past ${x.staleAfterDays}d)</span></span>`
               )
               .join("") +
@@ -1657,7 +1664,9 @@ function complianceRow(r, idx) {
     db = ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`;
   } else if (r.dependabot && r.dependabot.state === "stale") {
     const detail = (r.dependabot.stale || [])
-      .map((s) => `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})`)
+      .map((s) =>
+        `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})` +
+        (s.atLimit ? ` — ${s.openPRs} open PRs, AT the limit of ${s.prLimit}` : ""))
       .join("\n");
     db = ` <span class="db-stale" title="Configured but not running:\n${esc(detail)}\n\nNo error — Dependabot has simply gone quiet. Usually open-pull-requests-limit is reached, or GitHub paused the schedule.">⏱ dependabot idle</span>`;
   }
@@ -2214,7 +2223,40 @@ function depMeta(r) {
     segs.push(`<span class="dep-meta" title="depends on org repos: ${esc(r.dependsOnOrg.join(", "))}">→ depends on ${esc(fmt(r.dependsOnOrg))}</span>`);
   if (r.dependents && r.dependents.length)
     segs.push(`<span class="dep-meta" title="depended on by: ${esc(r.dependents.join(", "))}">↩ used by ${esc(fmt(r.dependents))}</span>`);
+  const db = dependabotMeta(r);
+  if (db) segs.push(db);
   return segs;
+}
+
+// Open Dependabot version-update PRs — routine bumps with no advisory behind them, which
+// this tool deliberately never acts on. It's a LINK and a count, never a button: the whole
+// point of the scope line is that merging arbitrary majors stays a human decision.
+//
+// Leads with the application-dependency count rather than the total, because github_actions
+// bumps are CI plumbing and rarely the thing that hurts; falling many majors behind on an
+// app dependency is how a future security patch ends up unappliable. Majors and failures are
+// called out for the same reason — they're the ones that rot rather than the ones that queue.
+function dependabotMeta(r) {
+  const d = r.dependabotPRs;
+  if (!d || !d.total) return "";
+  const org = (STATE.model && STATE.model.org) || "";
+  const url = `https://github.com/${org}/${r.name}/pulls?q=${encodeURIComponent("is:pr is:open author:app/dependabot")}`;
+  const bits = [];
+  if (d.app) bits.push(`${d.app} app`);
+  if (d.infra) bits.push(`${d.infra} ci`);
+  if (d.major) bits.push(`<strong class="db-major">${d.major} major</strong>`);
+  if (d.failing) bits.push(`<strong class="db-failing">${d.failing} failing</strong>`);
+  // The tooltip carries the detail the meta line can't: what, and how far behind.
+  const lines = d.prs
+    .slice(0, 12)
+    .map((p) => `#${p.number} ${p.pkg || p.title}${p.from ? ` ${p.from} → ${p.to}` : ""}${p.bump === "major" ? " (major)" : ""}${p.failing ? " ✗" : ""}`);
+  if (d.prs.length > 12) lines.push(`…and ${d.prs.length - 12} more`);
+  const age = d.oldestAt ? `\n\nOldest opened ${relTime(d.oldestAt)}.` : "";
+  return (
+    `<a class="dep-meta db-prs" href="${esc(url)}" target="_blank" rel="noopener" ` +
+    `title="Open Dependabot version-update PRs — routine bumps with no advisory, so this tool leaves them to you:\n${esc(lines.join("\n"))}${esc(age)}">` +
+    `🤖 ${d.total} Dependabot${bits.length ? ` · ${bits.join(" · ")}` : ""}</a>`
+  );
 }
 
 // A PR's review status as a small pill. "Review requested" means a reviewer was actually

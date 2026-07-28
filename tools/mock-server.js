@@ -41,6 +41,17 @@ const repos = [
     ],
     language: "Ruby", visibility: "PRIVATE", defaultBranch: "main", pushedAt: days(4),
     published: null, dependents: [], dependsOnOrg: ["acme-core-gem"],
+    // Routine Dependabot bumps: shown as context, never actioned. The spread is
+    // deliberate — app vs CI, a major, and a red one — so the meta line renders every part.
+    dependabotPRs: {
+      total: 12, app: 9, infra: 3, major: 2, failing: 2, oldestAt: days(96),
+      byEcosystem: { bundler: 7, npm_and_yarn: 2, github_actions: 3 },
+      prs: [
+        { number: 201, url: "#", title: "Bump puma from 7.2.1 to 8.0.2", ecosystem: "bundler", pkg: "puma", from: "7.2.1", to: "8.0.2", bump: "major", createdAt: days(96), failing: false },
+        { number: 202, url: "#", title: "Bump jbuilder from 2.14.1 to 2.15.1", ecosystem: "bundler", pkg: "jbuilder", from: "2.14.1", to: "2.15.1", bump: "minor", createdAt: days(47), failing: true },
+        { number: 204, url: "#", title: "Bump actions/checkout from 4 to 7", ecosystem: "github_actions", pkg: "actions/checkout", from: "4", to: "7", bump: "major", createdAt: days(23), failing: true },
+      ],
+    },
     contact: { name: "Casey Lee", email: "casey@example.com" },
     notifiedAt: null, newAdvisoryCount: 0, disposition: null, openPRs: [],
     blocked: [

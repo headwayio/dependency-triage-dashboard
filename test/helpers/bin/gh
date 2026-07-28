@@ -53,18 +53,35 @@ const PRS = {
         title: "Stacked bump", baseRefName: TOOL_BRANCH },
   300: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "release/deps-2026-07-01",
          title: "Release rollup" },                         // a rollup is not a rollup INPUT
+  // Dependabot's own version-update PRs — routine bumps with no advisory. The tool never
+  // acts on these, but it counts them, so the spread covers what the count has to
+  // distinguish: two ecosystems plus CI plumbing, a major, and one that's red.
+  201: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "dependabot/bundler/puma-8.0.2",
+         title: "Bump puma from 7.2.1 to 8.0.2", checks: ["SUCCESS"], lock: "Gemfile.lock", createdAt: "2026-05-02T00:00:00Z" },
+  202: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "dependabot/bundler/jbuilder-2.15.1",
+         title: "Bump jbuilder from 2.14.1 to 2.15.1", checks: ["FAILURE"], lock: "Gemfile.lock", createdAt: "2026-06-11T00:00:00Z" },
+  203: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "dependabot/npm_and_yarn/sortablejs-1.15.7",
+         title: "Bump sortablejs from 1.15.0 to 1.15.7", checks: [], lock: "package-lock.json", createdAt: "2026-07-01T00:00:00Z" },
+  204: { state: "OPEN", isDraft: false, reviewDecision: null, headRefName: "dependabot/github_actions/actions/checkout-7",
+         title: "Bump actions/checkout from 4 to 7", checks: ["SUCCESS"], lock: null, createdAt: "2026-07-05T00:00:00Z" },
 };
 for (const [n, pr] of Object.entries(PRS)) {
   pr.number = Number(n);
   pr.baseRefName = pr.baseRefName || "main";
   pr.url = `https://github.com/${ORG}/${REPO}/pull/${n}`;
-  pr.createdAt = `2026-07-${String(10 + (Number(n) % 20)).padStart(2, "0")}T00:00:00Z`;
+  // Derived from the number so PRs have a stable, distinct order — but never clobber an
+  // explicit date, because for the Dependabot fixtures age IS the thing under test.
+  pr.createdAt = pr.createdAt || `2026-07-${String(10 + (Number(n) % 20)).padStart(2, "0")}T00:00:00Z`;
 }
 
 // Which PRs are OPEN on the repo, per scenario. Order here is gh's listing order, so a route
 // that reorders (rollup honors the caller's merge order) can be caught doing it.
 const OPEN_PRS = {
-  default: [57],
+  default: [57, 201, 202, 203, 204],
+  "no-dependabot-prs": [57],
+  // Nothing of OURS open — the case a backlog actually accumulates in, since no tool PR
+  // draws the eye to the repo.
+  "only-dependabot": [201, 202, 203, 204],
   "tool-child": [90, 57],
   // Every category the rollup filter must reject, alongside two it must accept.
   "rollup-mix": [57, 90, 58, 60, 61, 300],
@@ -72,12 +89,18 @@ const OPEN_PRS = {
   "release-pr-open": [57, 90], // two eligible, so the route proceeds and the JOB does the skipping
   "slow-clone": [90, 57],      // pairs with the stalling clone below, for the concurrency test
 };
-const listFor = (s) => (OPEN_PRS[s] || OPEN_PRS.default).map((n) => ({
-  ...PRS[n],
-  isDraft: PRS[n].isDraft,
-  reviewRequests: [],
-  files: [{ path: "requirements.txt" }, { path: "poetry.lock" }],
-}));
+const listFor = (s) => (OPEN_PRS[s] || OPEN_PRS.default).map((n) => {
+  const pr = PRS[n];
+  const bot = pr.headRefName.startsWith("dependabot/");
+  return {
+    ...pr,
+    isDraft: pr.isDraft,
+    reviewRequests: [],
+    files: bot ? (pr.lock ? [{ path: pr.lock }] : []) : [{ path: "requirements.txt" }, { path: "poetry.lock" }],
+    author: { login: bot ? "app/dependabot" : "dev-user" },
+    statusCheckRollup: (pr.checks || []).map((c) => ({ conclusion: c })),
+  };
+});
 
 // What `gh repo view --json <merge flags>` reports. "unreadable" exits non-zero so the route's
 // can't-tell fallback is exercised; "none-allowed" answers with every method disabled, which is
@@ -159,6 +182,12 @@ if (is("repo", "clone")) {
     require("child_process").execFileSync("git", ["init", "-q", dest], { stdio: "ignore" });
   } catch (e) { fail(`stub clone failed: ${e.message}`); }
   out(`Cloning into '${dest}'...\n`);
+}
+
+// The narrow count query the staleness explainer uses. Derived from the same listing the
+// model build sees, so the card and the explanation can never disagree about what's open.
+if (is("pr", "list") && joined.includes("--author app/dependabot")) {
+  out(listFor(scenario).filter((p) => p.headRefName.startsWith("dependabot/")));
 }
 
 if (is("pr", "list")) {

@@ -243,6 +243,16 @@ async function enrichCompliance(orgRepos, force) {
         ),
       };
     }
+    // Only now, and only for the repos that came back stale, ask why. The staleness check
+    // says an ecosystem went quiet but not what silenced it, and the commonest answer —
+    // its open PRs are at `open-pull-requests-limit` — needs one extra listing per repo.
+    // Scoping it to the flagged set keeps that proportional to the problem, not the org.
+    for (const r of work) {
+      const v = out[r.name].dependabot;
+      if (!(v.stale || []).length) continue;
+      const counts = await dependabot.fetchPrCounts(config.org, r.name);
+      v.stale = dependabot.annotateStaleCause(v.stale, r.dependabotConfig, counts);
+    }
     for (const name of Object.keys(dependents)) {
       out[name] = out[name] || {};
       out[name].dependents = dependents[name];

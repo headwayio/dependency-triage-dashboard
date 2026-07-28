@@ -793,3 +793,12 @@ button.subtle { color: var(--muted); }
 .ord-pos { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 14px; text-align: right; font-size: 12px; flex: none; }
 .ord-pr { color: var(--accent); font-weight: 600; font-size: 13px; white-space: nowrap; flex: none; }
 .ord-title { flex: 1; min-width: 0; color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Open Dependabot version-update PRs on the card meta line. Deliberately quiet — it's
+   context, not a task — but majors and failures get colour, since those are the ones that
+   turn into a problem rather than just a queue. */
+.db-prs { color: var(--muted); white-space: nowrap; }
+.db-prs:hover { color: var(--text); text-decoration: none; }
+.db-prs .db-major { color: var(--medium); font-weight: 650; }
+.db-prs .db-failing { color: var(--critical); font-weight: 650; }
+.stale-cause { color: var(--medium); }

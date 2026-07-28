@@ -76,6 +76,23 @@ potentially breaking) version bumps would both dilute the audit trail and risk
 breakage. Routine upgrades stay a human decision — review and merge them on GitHub,
 or let Dependabot auto-merge if you configure it.
 
+Not acting on them isn't a reason to hide them, though. Each card's meta line carries a
+count of the repo's open Dependabot version-update PRs — **🤖 12 Dependabot · 9 app · 3 ci
+· 2 major · 2 failing** — linking to that repo's filtered PR list. It's a link and a count,
+never a button.
+
+The split is the point. `github_actions` bumps are CI plumbing; an **app** dependency
+drifting several majors behind is what eventually makes a security patch unappliable, which
+is squarely this tool's problem. Majors and failures are called out for the same reason —
+they're the ones that rot rather than the ones that merely queue. And enough open PRs in one
+ecosystem silently trips `open-pull-requests-limit`, which stops Dependabot running that
+ecosystem at all; the count is what lets the
+[idle detector](#-idle--a-configured-ecosystem-stopped-running) say *"5 open PRs, at the
+limit of 5"* instead of just *"quiet for 105 days"*.
+
+This costs no extra request: `fetchToolPRs` already lists every open PR per repo to find its
+own, and used to discard the rest.
+
 The one place the tool *interacts* with those version-update PRs is read-only/advisory:
 on a no-change re-check it may comment `@dependabot recreate` on a `dependabot/*` PR
 **only when that PR's target is already satisfied on the default branch** (i.e. it's
