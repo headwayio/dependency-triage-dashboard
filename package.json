@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "node --watch server.js",
-    "start:once": "node server.js"
+    "start:once": "node server.js",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {
     "node": ">=18"

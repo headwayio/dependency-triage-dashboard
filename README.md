@@ -82,6 +82,35 @@ on a no-change re-check it may comment `@dependabot recreate` on a `dependabot/*
 superseded) — see [Create update PR](#create-update-pr). It never opens, edits, or
 merges a version-update PR.
 
+## Tests
+
+```bash
+npm test
+```
+
+Node's built-in runner (`node --test`) — **no test dependencies**, matching the zero-dependency
+runtime. Tests live in `test/`.
+
+The interesting part is `test/helpers/`. Routes here do irreversible things to real
+repositories — merge, close, rewrite branches, dismiss alerts — so they can't be tested against
+GitHub, and testing a reimplementation of them proves nothing. Instead:
+
+- **`test/helpers/bin/gh`** is a stand-in for the `gh` CLI, put first on `PATH`. It serves small
+  literal fixtures chosen by a scenario name, and appends **every invocation** to a log.
+- **`test/helpers/harness.js`** boots the **real `server.js`** against it — from a copy in a temp
+  dir, since the server resolves `config.json` and its state files from its own `__dirname` and
+  would otherwise read your real config and write your real state. Each test gets its own server
+  and temp dir, so a route that mutates the model cache can't leak into the next one.
+
+So a test exercises genuine route code with no network and no victim repo. Assertions go on the
+**recorded `gh` argv**, not just the response body: the body only proves the server *reported* a
+merge, while the argv proves it asked for the right one — `--squash` vs `--merge`,
+`--delete-branch` or not, and `--admin` never. That distinction is where the real bugs were.
+
+Adding a case usually means adding one `scenario` branch to the stub. The pattern generalises to
+every mutating route (`/api/rollup`, `/api/consolidate`, `/api/rebase`, `/api/dismiss-alerts`),
+which are all shaped the same way and rather more destructive than a merge.
+
 ## Prerequisites
 
 - **Node.js ≥ 18** (`node -v`)

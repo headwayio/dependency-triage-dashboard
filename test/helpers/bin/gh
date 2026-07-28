@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+"use strict";
+
+// A stand-in for the `gh` CLI, put first on PATH so the REAL server.js runs against it.
+// Nothing here touches GitHub, so tests can exercise destructive routes (merge, rollup,
+// dismiss) without a network or a victim repo.
+//
+// Two channels control it:
+//   GH_STUB_DIR    a scratch dir. `scenario` in it names the fixture variation to serve;
+//                  every invocation is appended to `gh.log` as one argv line, so a test can
+//                  assert on the exact command — which is the point. Asserting the response
+//                  body only proves we reported a merge; asserting the argv proves we asked
+//                  for the right one (`--squash` vs `--merge`, `--delete-branch` or not).
+//   GH_STUB_ORG    the org name the fixtures answer for.
+//
+// Add a scenario by adding a branch below; the fixtures are deliberately small and literal
+// so a test reads as "given this repo state, we expect this command".
+
+const fs = require("fs");
+const path = require("path");
+
+const argv = process.argv.slice(2);
+const joined = argv.join(" ");
+const DIR = process.env.GH_STUB_DIR || "";
+const ORG = process.env.GH_STUB_ORG || "acme-corp";
+const read = (f, d = "") => { try { return fs.readFileSync(path.join(DIR, f), "utf8").trim(); } catch { return d; } };
+const scenario = read("scenario", "default");
+
+if (DIR) { try { fs.appendFileSync(path.join(DIR, "gh.log"), joined + "\n"); } catch { /* best effort */ } }
+
+const out = (v) => { process.stdout.write(typeof v === "string" ? v : JSON.stringify(v)); process.exit(0); };
+const fail = (msg) => { process.stderr.write(msg.endsWith("\n") ? msg : msg + "\n"); process.exit(1); };
+
+// ---- fixtures ---------------------------------------------------------------
+const REPO = "data-pipeline";
+const TOOL_BRANCH = "dependency-updates/soc2-2026-07-20";
+
+// One PR per state the merge route has to distinguish. `number` doubles as the test's handle.
+const PRS = {
+  57: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", headRefName: TOOL_BRANCH,
+        title: "Bump cryptography + jinja2" },
+  58: { state: "OPEN", isDraft: false, reviewDecision: "APPROVED", headRefName: "feature/checkout-redesign",
+        title: "Human feature work" },                      // not a tool branch — must be refused
+  59: { state: "MERGED", isDraft: false, reviewDecision: "APPROVED", headRefName: "dependency-updates/soc2-2026-07-01",
+        title: "Already merged" },
+  60: { state: "OPEN", isDraft: false, reviewDecision: "CHANGES_REQUESTED", headRefName: "dependency-updates/soc2-2026-07-25",
+        title: "Contested bump" },
+  61: { state: "OPEN", isDraft: true, reviewDecision: "APPROVED", headRefName: "dependency-updates/soc2-2026-07-26",
+        title: "Draft bump" },
+};
+for (const [n, pr] of Object.entries(PRS)) {
+  pr.number = Number(n);
+  pr.baseRefName = "main";
+  pr.url = `https://github.com/${ORG}/${REPO}/pull/${n}`;
+}
+
+// What `gh repo view --json <merge flags>` reports. "unreadable" exits non-zero so the route's
+// can't-tell fallback is exercised; "none-allowed" answers with every method disabled, which is
+// a different thing and must not be confused with it.
+const MERGE_CAPS = {
+  default: { squashMergeAllowed: true, mergeCommitAllowed: true, rebaseMergeAllowed: true },
+  "no-squash": { squashMergeAllowed: false, mergeCommitAllowed: true, rebaseMergeAllowed: true },
+  "rebase-only": { squashMergeAllowed: false, mergeCommitAllowed: false, rebaseMergeAllowed: true },
+  "none-allowed": { squashMergeAllowed: false, mergeCommitAllowed: false, rebaseMergeAllowed: false },
+};
+
+// An open PR whose base IS PR 57's head branch, i.e. something stacked on it. "tool-child" is
+// one of ours; "human-child" is not — the model cache only holds ours, so only a live GitHub
+// query can see the second, and that difference is the reason the route asks GitHub.
+const STACK_CHILD = { "tool-child": 90, "human-child": 99 };
+
+// ---- routes -----------------------------------------------------------------
+const is = (...words) => words.every((w, i) => argv[i] === w);
+
+if (is("api") && argv[1] === "user") out("test-user\n");
+
+if (is("api") && joined.includes("dependabot/alerts")) {
+  out(JSON.stringify({
+    repoName: REPO, ghsa: "GHSA-abab-1414-mman", severity: "critical", pkg: "cryptography",
+    ecosystem: "pip", patched: "44.0.1", patchedVersions: ["44.0.1"],
+    manifest: "requirements.txt", summary: "Vulnerability in cryptography", url: "https://example.test/ghsa",
+  }) + "\n");
+}
+if (is("api")) out("[]"); // members, contents, and anything else best-effort
+
+if (is("repo", "list")) {
+  out([{
+    name: REPO, nameWithOwner: `${ORG}/${REPO}`, isArchived: false, isFork: false,
+    pushedAt: "2026-07-20T00:00:00Z", defaultBranchRef: { name: "main" },
+    primaryLanguage: { name: "Python" }, description: "", visibility: "PRIVATE",
+    url: `https://github.com/${ORG}/${REPO}`,
+  }]);
+}
+
+if (is("repo", "view")) {
+  if (scenario === "caps-unreadable") fail("HTTP 502: could not read repository");
+  out(MERGE_CAPS[scenario] || MERGE_CAPS.default);
+}
+
+// `pr list --base X` is the "is anything stacked on this?" probe. Answer it before the general
+// listing, which is the model build.
+if (is("pr", "list") && argv.includes("--base")) {
+  const base = argv[argv.indexOf("--base") + 1];
+  const child = STACK_CHILD[scenario];
+  out(child && base === TOOL_BRANCH ? [{ number: child }] : []);
+}
+
+if (is("pr", "list")) {
+  if (joined.includes("--state all")) out([]); // reviewer-history lookup
+  const stacked = STACK_CHILD[scenario] === 90
+    ? [{ number: 90, url: "https://example.test/90", isDraft: false, createdAt: "2026-07-21T00:00:00Z",
+         headRefName: "dependency-updates/soc2-2026-07-21", baseRefName: TOOL_BRANCH,
+         title: "Stacked bump", reviewDecision: null, reviewRequests: [],
+         files: [{ path: "requirements.txt" }] }]
+    : [];
+  out([...stacked, {
+    number: 57, url: PRS[57].url, isDraft: false, createdAt: "2026-07-20T00:00:00Z",
+    headRefName: TOOL_BRANCH, baseRefName: "main", title: PRS[57].title,
+    reviewDecision: "APPROVED", reviewRequests: [],
+    files: [{ path: "requirements.txt" }, { path: "poetry.lock" }],
+  }]);
+}
+
+if (is("pr", "view")) {
+  if (scenario === "view-fails") fail("could not resolve to a PullRequest with the number of 57");
+  const pr = PRS[Number(argv[2])];
+  if (!pr) fail(`no pull request found for #${argv[2]}`);
+  if (argv.includes("--jq")) out(pr.headRefName + "\n"); // prBranch()
+  out(pr);
+}
+
+if (is("pr", "merge")) {
+  if (scenario === "merge-blocked") {
+    fail("GraphQL: Pull request is not mergeable: 1 of 2 required status checks have not passed. (mergePullRequest)");
+  }
+  out(`✓ Merged pull request ${ORG}/${REPO}#${argv[2]}\n`);
+}
+
+out(""); // anything unrecognised succeeds silently rather than failing a test for the wrong reason
