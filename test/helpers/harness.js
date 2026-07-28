@@ -12,6 +12,7 @@
 // mutates the model cache (merge does) can't leak into the next test.
 
 const { spawn } = require("child_process");
+const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const net = require("net");
@@ -121,6 +122,58 @@ async function startServer({ config = {}, scenario = "default" } = {}) {
     /** Every `claude` invocation. Usually asserted EMPTY — no test should launch a session. */
     claudeArgs() {
       return fs.readFileSync(path.join(stubDir, "claude.log"), "utf8").split("\n").filter(Boolean);
+    },
+    /**
+     * Poll a background job to completion. Routes that start jobs answer immediately with a
+     * jobId, so a test that asserts right away is racing the work it means to observe.
+     * Resolves the job record once it is done/error, or throws on timeout.
+     */
+    async waitForJob(jobId, timeoutMs = 20000) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const { body } = await this.request("/api/jobs");
+        const job = (body.jobs || []).find((j) => j.id === jobId);
+        if (job && (job.status === "done" || job.status === "error")) return job;
+        if (Date.now() > deadline) throw new Error(`job ${jobId} did not finish in ${timeoutMs}ms (status: ${job && job.status})`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    },
+    /**
+     * Subscribe to the job event stream. Call BEFORE the route that starts the job — the
+     * server replays a still-active job's buffered events on connect, but a job that already
+     * finished is gone. Returns { lines, logText, close }.
+     */
+    async events() {
+      const lines = [];
+      let buf = "";
+      // Resolve only once the stream's opening `hello` has arrived, not merely once headers
+      // have. The route writes hello and THEN registers the client, so returning on headers
+      // leaves a window where a job started immediately afterwards emits into a subscriber
+      // list we are not in yet — and the events are simply lost.
+      return await new Promise((resolve, reject) => {
+        const req = http.get({ host: "127.0.0.1", port, path: "/api/events" }, (res) => {
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => {
+            buf += chunk;
+            let i;
+            while ((i = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, i); buf = buf.slice(i + 1);
+              if (!line.trim()) continue;
+              try { lines.push(JSON.parse(line)); } catch { /* partial frame */ }
+              if (lines.length === 1) {
+                resolve({
+                  lines,
+                  /** Just the human-readable log lines, in order — what the card would show. */
+                  logText: () => lines.filter((e) => e.line).map((e) => e.line),
+                  close: () => req.destroy(),
+                });
+              }
+            }
+          });
+        });
+        req.on("error", reject);
+        setTimeout(() => reject(new Error("event stream did not open in 5s")), 5000).unref();
+      });
     },
     serverLog: () => log,
     stop() {
