@@ -633,7 +633,12 @@ supported and requested as `org/slug`.
 A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
 console (`lib/reviews.js`). It lists every thread (Copilot 🤖 / human 👤 with file:line + diff
 context), auto-triages the **Copilot** ones with an advisory *fix / skip* suggestion, and lets
-you **skip** any.
+you **skip** any. Each verdict carries an **ask** button that opens a
+follow-up conversation about that one comment — the triage reason is a single line, which is
+fine for scanning and useless the moment you disagree with it. The exchange is seeded with
+the comment, its diff, and the verdict being questioned, so it can defend or revise it
+(`POST /api/review-ask`). It's stateless: the panel owns the transcript and posts it back
+each turn, and it's discarded when the panel closes.
 
 The count is *unresolved*, not *unresolved and current*. A thread goes **outdated** when
 the line it was anchored to changes — which this tool does constantly, since every CI fix,

@@ -3370,7 +3370,7 @@ function onOpenReviewPanel(r, btn) { openReviewPanel(r, Number(btn.dataset.numbe
 
 async function openReviewPanel(r, number) {
   const pr = (r.openPRs || []).find((p) => p.number === number);
-  REVIEW = { repo: r.name, nameWithOwner: r.nameWithOwner || r.name, number, prUrl: pr && pr.url, title: (pr && pr.title) || "", threads: null, verdicts: {}, skips: new Set(), cursor: 0, investigating: false, error: null };
+  REVIEW = { repo: r.name, nameWithOwner: r.nameWithOwner || r.name, number, prUrl: pr && pr.url, title: (pr && pr.title) || "", threads: null, verdicts: {}, skips: new Set(), cursor: 0, investigating: false, error: null, chats: {} };
   renderReviewPanel();
   try {
     const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(r.name)}&number=${number}`);
@@ -3410,7 +3410,14 @@ function reviewThreadHtml(t, i) {
     if (v.investigating && !verdict) badge = `<span class="rv-verdict pending"><span class="spin tiny"></span>investigating</span>`;
     else if (verdict) badge = `<span class="rv-verdict ${verdict.recommend === "skip" ? "skip" : "fix"}">${verdict.recommend === "skip" ? "⚠ likely skip" : "✅ worth fixing"}</span>`;
   }
-  const reason = verdict && verdict.reason ? `<div class="rv-reason">${esc(verdict.reason)}</div>` : "";
+  // The one-line reason is right for scanning a list and useless the moment you disagree
+  // with it. "Ask" reopens the same judgement with room to answer, and keeps the exchange
+  // going — so a verdict is arguable rather than merely asserted.
+  const chat = (v.chats && v.chats[t.id]) || null;
+  const askBtn = `<button class="rv-ask-btn" data-act="ask" data-id="${esc(t.id)}" title="Ask why — and keep asking">${chat && chat.open ? "hide" : "ask"}</button>`;
+  const reason = verdict && verdict.reason
+    ? `<div class="rv-reason">${esc(verdict.reason)} ${askBtn}</div>`
+    : `<div class="rv-reason muted">${t.isCopilot && v.investigating ? "" : askBtn}</div>`;
   const loc = `${esc(t.path || "")}${t.line ? ":" + t.line : ""}`;
   // Only when GitHub can no longer place the comment in the current diff (`anchorLost`) —
   // NOT on the GraphQL isOutdated flag, which goes true as soon as any newer commit exists
@@ -3425,6 +3432,81 @@ function reviewThreadHtml(t, i) {
       ${reason}
       <div class="rv-body">${mdInline(t.body || "")}</div>
       ${t.diffHunk ? `<pre class="rv-diff">${esc(t.diffHunk)}</pre>` : ""}
+      ${chat && chat.open ? reviewChatHtml(t, chat) : ""}
+    </div>
+  </div>`;
+}
+
+// Open/close one thread's exchange. The transcript lives in REVIEW so it survives the
+// panel's re-renders, and dies with the panel — this is a conversation about a decision
+// you're making now, not a record worth persisting.
+function toggleReviewChat(threadId) {
+  if (!REVIEW) return;
+  REVIEW.chats = REVIEW.chats || {};
+  const cur = REVIEW.chats[threadId];
+  REVIEW.chats[threadId] = cur
+    ? { ...cur, open: !cur.open }
+    : { open: true, messages: [], pending: false, error: null };
+  renderReviewPanel();
+  if (REVIEW.chats[threadId].open) focusReviewChat(threadId);
+}
+
+// Put the caret back after a re-render, and keep the newest turn in view. Without this every
+// send would bounce focus to the top of the panel and hide the answer that just arrived.
+function focusReviewChat(threadId) {
+  const box = document.querySelector(`.rv-chat-input[data-id="${cssEscape(threadId)}"]`);
+  if (!box) return;
+  box.focus();
+  const chat = box.closest(".rv-chat");
+  if (chat) chat.scrollIntoView({ block: "nearest" });
+}
+
+async function sendReviewChat(threadId) {
+  if (!REVIEW) return;
+  const box = document.querySelector(`.rv-chat-input[data-id="${cssEscape(threadId)}"]`);
+  const question = box ? box.value.trim() : "";
+  const chat = (REVIEW.chats || {})[threadId];
+  if (!chat || chat.pending || !question) return;
+  const thread = (REVIEW.threads || []).find((t) => t.id === threadId);
+  if (!thread) return;
+  chat.messages = [...(chat.messages || []), { role: "user", content: question }];
+  chat.pending = true;
+  chat.error = null;
+  renderReviewPanel();
+  focusReviewChat(threadId);
+  try {
+    const data = await postJSON("/api/review-ask", {
+      repo: REVIEW.repo,
+      number: REVIEW.number,
+      threadId,
+      verdict: REVIEW.verdicts[threadId] || null,
+      messages: chat.messages,
+    });
+    chat.messages = [...chat.messages, { role: "assistant", content: data.reply }];
+  } catch (e) {
+    // Keep the question in the transcript — retyping it to retry would be the annoying part.
+    chat.error = e.message;
+  } finally {
+    chat.pending = false;
+    // The panel may have been closed, or moved to another PR, while the answer was in flight.
+    if (REVIEW && REVIEW.chats && REVIEW.chats[threadId]) { renderReviewPanel(); focusReviewChat(threadId); }
+  }
+}
+
+// One thread's follow-up exchange. Kept inline under the comment rather than in a separate
+// pane: the diff, the verdict and the argument about it belong together, and a side panel
+// would mean losing the comment you are arguing about.
+function reviewChatHtml(t, chat) {
+  const turns = (chat.messages || [])
+    .map((m) => `<div class="rv-turn ${m.role}"><span class="rv-turn-who">${m.role === "user" ? "you" : "claude"}</span><div class="rv-turn-body">${m.role === "user" ? esc(m.content) : mdInline(m.content)}</div></div>`)
+    .join("");
+  const pending = chat.pending ? `<div class="rv-turn assistant"><span class="rv-turn-who">claude</span><div class="rv-turn-body"><span class="spin tiny"></span>thinking</div></div>` : "";
+  const err = chat.error ? `<div class="rv-chat-err">${esc(chat.error)}</div>` : "";
+  return `<div class="rv-chat" data-chat="${esc(t.id)}">
+    ${turns}${pending}${err}
+    <div class="rv-chat-row">
+      <textarea class="rv-chat-input" data-id="${esc(t.id)}" rows="1" placeholder="Why? Ask a follow-up…  (Enter to send, Shift+Enter for a newline)"${chat.pending ? " disabled" : ""}></textarea>
+      <button class="rv-chat-send" data-act="send" data-id="${esc(t.id)}"${chat.pending ? " disabled" : ""}>Send</button>
     </div>
   </div>`;
 }
@@ -3445,6 +3527,15 @@ function renderReviewPanel() {
       if (a.dataset.act === "close") return closeReviewPanel();
       if (a.dataset.act === "address") return addressReview();
       if (a.dataset.act === "investigate") return reinvestigate();
+      if (a.dataset.act === "ask") return toggleReviewChat(a.dataset.id);
+      if (a.dataset.act === "send") return sendReviewChat(a.dataset.id);
+    });
+    // Enter sends, Shift+Enter newlines — the usual chat contract. Bound on the overlay so
+    // it survives the re-render that each turn causes.
+    overlay.addEventListener("keydown", (e) => {
+      const box = e.target.closest && e.target.closest(".rv-chat-input");
+      if (!box) return;
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendReviewChat(box.dataset.id); }
     });
     overlay.addEventListener("change", (e) => {
       const cb = e.target.closest('input[data-act="skip"]');
@@ -3613,6 +3704,10 @@ function reviewKeydown(e) {
   if (!REVIEW) return;
   if (document.querySelector(".confirm-overlay")) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser/OS combos alone
+  // The console's shortcuts are bare letters, so anything typed into the ask box would move
+  // the cursor instead of appearing in the field. Escape still gets through, to leave.
+  const t = e.target;
+  if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable) && e.key !== "Escape") return;
   const k = e.key;
   if (k === "Escape") { e.preventDefault(); return closeReviewPanel(); }
   if (k === "j" || k === "ArrowDown") { e.preventDefault(); return moveReviewCursor(1); }

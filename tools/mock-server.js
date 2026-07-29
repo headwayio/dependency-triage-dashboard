@@ -451,10 +451,18 @@ http.createServer((req, res) => {
       }
       // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
       // the picker renders from that response, so a canned reply would make it look broken.
+      if (route === "/api/review-ask") {
+        const last = (b.messages || []).filter((m) => m.role === "user").pop();
+        return json(res, { threadId: b.threadId, reply:
+          `pnpm rewrites peer metadata into the lockfile whenever a version is resolved, so the exact \`7.29.6\` is generated output rather than a hand-pinned constraint. Regenerating would produce the same file.\n\nYou asked: "${(last && last.content) || ""}" — if your workspace sets \`resolutions\`, that would be the thing to change, not the lockfile.` });
+      }
       if (route === "/api/review-investigate") {
-        // Never resolves — parks the panel in the investigating state on purpose, so the
-        // spinner can actually be looked at rather than guessed at.
-        return; // no response
+        // Set GH_STUB_SPIN=1 to park the panel in the investigating state instead, so the
+        // spinner can be looked at rather than guessed at.
+        if (process.env.GH_STUB_SPIN === "1") return; // never responds, on purpose
+        return json(res, { verdicts: {
+          T1: { recommend: "skip", reason: "Expected pnpm behavior: overrides rewrite peer ranges in the generated lockfile." },
+        } });
       }
       if (route === "/api/request-review") {
         // ?nullreviewers=1 mimics the real server answering when the PR is absent from

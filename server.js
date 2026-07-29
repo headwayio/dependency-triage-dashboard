@@ -1609,6 +1609,25 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { repo, number: num, verdicts });
     }
 
+    // Follow-up question about ONE thread's verdict. Stateless: the client owns the
+    // transcript and posts it back; the thread is re-read here rather than trusted from the
+    // request, so the answer always concerns the comment as it currently stands.
+    if (req.method === "POST" && route === "/api/review-ask") {
+      const { repo, number, threadId, verdict, messages } = await repoBody(req);
+      const num = Number(number);
+      if (!repo || !Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "repo and number required." });
+      if (!threadId || typeof threadId !== "string") return sendJSON(res, 400, { error: "threadId required." });
+      if (!Array.isArray(messages) || !messages.length) return sendJSON(res, 400, { error: "Ask a question first." });
+      gh.assertRepoName(repo);
+      const nwo = `${config.org}/${repo}`;
+      const threads = await reviews.fetchReviewThreads(nwo, num);
+      const thread = threads.find((t) => t.id === threadId);
+      if (!thread) return sendJSON(res, 404, { error: "That review thread is no longer on the PR." });
+      const reply = await reviews.askAboutThread(nwo, thread, verdict || null, messages);
+      if (!reply) return sendJSON(res, 502, { error: "The assistant didn't answer — try again." });
+      return sendJSON(res, 200, { repo, number: num, threadId, reply });
+    }
+
     // Address the selected review threads on a PR via a headless Claude session, then
     // reply-to + resolve each. threadIds = the threads the user left selected (not skipped).
     if (req.method === "POST" && route === "/api/review-address") {
