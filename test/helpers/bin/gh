@@ -84,7 +84,7 @@ const OPEN_PRS = {
   "only-dependabot": [201, 202, 203, 204],
   "tool-child": [90, 57],
   // Every category the rollup filter must reject, alongside two it must accept.
-  "rollup-mix": [57, 90, 58, 60, 61, 300],
+  "rollup-mix": [57, 90, 58, 60, 61, 300, 201],
   "rollup-one": [57],
   "release-pr-open": [57, 90], // two eligible, so the route proceeds and the JOB does the skipping
   "slow-clone": [90, 57],      // pairs with the stalling clone below, for the concurrency test

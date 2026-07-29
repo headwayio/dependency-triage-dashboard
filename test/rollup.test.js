@@ -19,8 +19,8 @@ const { startServer } = require("./helpers/harness");
 const REPO = "data-pipeline";
 
 // The mixed fixture: 57 + 90 are eligible tool PRs; 58 is a human's branch, 60 has changes
-// requested, 61 is a draft, and 300 is itself a release rollup. Only 57 and 90 may ever land
-// in a rollup.
+// requested, 61 is a draft, 300 is itself a release rollup, and 201 is one of Dependabot's
+// own version-update PRs. Only 57 and 90 may ever land in a rollup.
 const MIX = { scenario: "rollup-mix" };
 const ELIGIBLE = [57, 90];
 
@@ -60,6 +60,17 @@ test("does not count a human PR toward the two-PR minimum", async (t) => {
   // The sharp one. If the tool-branch filter were dropped this would report found 2 and
   // proceed — and the rollup would later CLOSE #58, which belongs to someone else.
   const { status, body } = await rollup(t, { ...MIX, numbers: [58, 57] });
+  assert.equal(status, 409);
+  assert.match(body.error, /found 1/);
+});
+
+test("does not count a Dependabot PR toward the two-PR minimum", async (t) => {
+  // Same mechanism as the human-PR case above — `dependabot/` is not a tool-branch prefix —
+  // but this is the realistic version of it. A colleague's feature branch sitting beside a
+  // rollup cluster is occasional; Dependabot PRs are in every repo, often a dozen at a time.
+  // And a rollup CLOSES its inputs, so the failure here would be closing a Dependabot PR:
+  // routine-looking, unattributed, and far likelier to go unnoticed than closing a person's.
+  const { status, body } = await rollup(t, { ...MIX, numbers: [201, 57] });
   assert.equal(status, 409);
   assert.match(body.error, /found 1/);
 });
