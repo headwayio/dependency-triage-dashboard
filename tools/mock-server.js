@@ -41,6 +41,17 @@ const repos = [
     ],
     language: "Ruby", visibility: "PRIVATE", defaultBranch: "main", pushedAt: days(4),
     published: null, dependents: [], dependsOnOrg: ["acme-core-gem"],
+    // Routine Dependabot bumps: shown as context, never actioned. The spread is
+    // deliberate — app vs CI, a major, and a red one — so the meta line renders every part.
+    dependabotPRs: {
+      total: 12, app: 9, infra: 3, major: 2, failing: 2, oldestAt: days(96),
+      byEcosystem: { bundler: 7, npm_and_yarn: 2, github_actions: 3 },
+      prs: [
+        { number: 201, url: "#", title: "Bump puma from 7.2.1 to 8.0.2", ecosystem: "bundler", pkg: "puma", from: "7.2.1", to: "8.0.2", bump: "major", createdAt: days(96), failing: false },
+        { number: 202, url: "#", title: "Bump jbuilder from 2.14.1 to 2.15.1", ecosystem: "bundler", pkg: "jbuilder", from: "2.14.1", to: "2.15.1", bump: "minor", createdAt: days(47), failing: true },
+        { number: 204, url: "#", title: "Bump actions/checkout from 4 to 7", ecosystem: "github_actions", pkg: "actions/checkout", from: "4", to: "7", bump: "major", createdAt: days(23), failing: true },
+      ],
+    },
     contact: { name: "Casey Lee", email: "casey@example.com" },
     notifiedAt: null, newAdvisoryCount: 0, disposition: null, openPRs: [],
     blocked: [
@@ -155,7 +166,11 @@ const repos = [
     language: "Python", visibility: "PRIVATE", defaultBranch: "main", pushedAt: days(3),
     published: null, dependents: [], dependsOnOrg: [],
     contact: null, notifiedAt: null, newAdvisoryCount: 0, disposition: null,
-    openPRs: [{ number: 57, url: "https://github.com/acme-corp/data-pipeline/pull/57", draft: false, reviewDecision: "APPROVED", reviewers: [] }],
+    // Approved and mergeable, but a PR this tool didn't open is racing it for the same
+    // lockfile — the foreign-collision warning (annotateForeignCollisions) renders from this.
+    openPRs: [{ number: 57, url: "https://github.com/acme-corp/data-pipeline/pull/57", draft: false, reviewDecision: "APPROVED", reviewers: [],
+      headRefName: "dependency-updates/soc2-2026-07-27", baseRefName: "main", lockfiles: ["poetry.lock"],
+      collidesWith: [{ number: 61, url: "https://github.com/acme-corp/data-pipeline/pull/61", title: "Pin transformers + retrain embeddings", draft: false, author: "priya", lockfiles: ["poetry.lock"] }] }],
     engagement: null,
   },
   {
@@ -368,8 +383,10 @@ const STATIC = {
   "/styles.css": ["public/styles.css", "text/css; charset=utf-8"],
 };
 
-const json = (res, obj) => {
-  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+// `status` matters for the error paths: the client branches on res.ok, so a refusal sent as
+// 200 with an {error} body would be read as success.
+const json = (res, obj, status = 200) => {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
 };
 
@@ -391,6 +408,17 @@ http.createServer((req, res) => {
   if (route === "/api/pr-status") return json(res, { autoFixCI: true, statuses: ciStatuses, prMeta });
   if (route === "/api/eol-status") return json(res, { autoUpgradeEOL: true, eol: eolStatus });
   if (route === "/api/protection-status") return json(res, { protection });
+  if (route === "/api/review-threads") {
+    return json(res, { threads: [
+      { id: "T1", isResolved: false, isOutdated: true, anchorLost: false, author: "copilot-pull-request-reviewer", isCopilot: true,
+        body: "peerDependencies pinned to an exact version during lockfile generation.",
+        path: "pnpm-lock.yaml", line: 749, diffHunk: "@@ -736,18 +745,18 @@\n-  '@babel/core': ^7.0.0\n+  '@babel/core': 7.29.6",
+        url: "https://github.com/acme-corp/acme-frontend/pull/142#discussion_r1" },
+      { id: "T2", isResolved: false, isOutdated: true, anchorLost: true, author: "caseylee", isCopilot: false,
+        body: "Can we keep the range here?", path: "package.json", line: 12, diffHunk: "",
+        url: "https://github.com/acme-corp/acme-frontend/pull/142#discussion_r2" },
+    ] });
+  }
   if (route === "/api/compliance") return json(res, compliance);
   if (route === "/api/settings") return json(res, settings);
   if (route === "/api/engagement-log") return json(res, { repo: u.searchParams.get("repo"), log: engagementLog[u.searchParams.get("repo")] || [] });
@@ -407,8 +435,35 @@ http.createServer((req, res) => {
       if (route === "/api/scope-override") return json(res, { repo: b.repo, scope: b.scope || "out", override: b.scope ? { scope: b.scope, reason: b.reason } : null, derived: "out" });
       if (route === "/api/protect-branch") return json(res, { repo: b.repo, branch: "main", updated: false, rulesetId: 1 });
       if (route === "/api/unprotect-branch") return json(res, { repo: b.repo, removed: true, stillProtected: false, via: null });
+      // Merge actually removes the PR from this process's model (and from the poll's prMeta),
+      // like the real server drops it from its cache — a canned ok would leave the merged PR
+      // sitting in the Approved tab on the next poll, which is exactly the bug worth catching.
+      if (route === "/api/merge-pr") {
+        const repo = repos.find((x) => x.name === b.repo);
+        const num = Number(b.number);
+        const pr = repo && (repo.openPRs || []).find((p) => p.number === num);
+        if (!pr) return json(res, { error: `PR #${num} isn't open on ${b.repo}.` }, 409);
+        repo.openPRs = repo.openPRs.filter((p) => p.number !== num);
+        repo.pending = repo.openPRs.length > 0;
+        if (prMeta[b.repo]) prMeta[b.repo] = prMeta[b.repo].filter((m) => m.number !== num);
+        if (!repo.openPRs.length) delete ciStatuses[b.repo];
+        return json(res, { repo: b.repo, number: num, merged: true, method: "squash", branchDeleted: true, base: pr.baseRefName || repo.defaultBranch || "main", title: pr.title || "", url: pr.url || "" });
+      }
       // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
       // the picker renders from that response, so a canned reply would make it look broken.
+      if (route === "/api/review-ask") {
+        const last = (b.messages || []).filter((m) => m.role === "user").pop();
+        return json(res, { threadId: b.threadId, reply:
+          `pnpm rewrites peer metadata into the lockfile whenever a version is resolved, so the exact \`7.29.6\` is generated output rather than a hand-pinned constraint. Regenerating would produce the same file.\n\nYou asked: "${(last && last.content) || ""}" — if your workspace sets \`resolutions\`, that would be the thing to change, not the lockfile.` });
+      }
+      if (route === "/api/review-investigate") {
+        // Set GH_STUB_SPIN=1 to park the panel in the investigating state instead, so the
+        // spinner can be looked at rather than guessed at.
+        if (process.env.GH_STUB_SPIN === "1") return; // never responds, on purpose
+        return json(res, { verdicts: {
+          T1: { recommend: "skip", reason: "Expected pnpm behavior: overrides rewrite peer ranges in the generated lockfile." },
+        } });
+      }
       if (route === "/api/request-review") {
         // ?nullreviewers=1 mimics the real server answering when the PR is absent from
         // its model cache — it returns reviewers:null and the client must not regress.

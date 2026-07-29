@@ -782,6 +782,13 @@ function drawCompliance() {
                 (x) =>
                   `<span><code>${esc(x.repo)}</code> · ${esc(x.ecosystem)} · ` +
                   (x.ageDays == null ? "never run" : `last ran ${x.ageDays}d ago`) +
+                  // When we know the cause, lead with it — "at the limit" turns this from
+                  // "go investigate" into "merge or close those five".
+                  (x.atLimit
+                    ? ` · <strong class="stale-cause">${x.openPRs} open PRs, at the limit of ${x.prLimit}</strong>`
+                    : x.openPRs != null
+                      ? ` · ${x.openPRs} open PR${x.openPRs === 1 ? "" : "s"} of ${x.prLimit}`
+                      : "") +
                   ` <span class="muted">(${esc(x.interval)}, flagged past ${x.staleAfterDays}d)</span></span>`
               )
               .join("") +
@@ -1002,6 +1009,7 @@ function navAction(key) {
   if (key === "R") return kbRollup();
   if (key === "c") return kbReviewComments();
   if (key === "m") return kbReadyForReview();
+  if (key === "M") return kbMergePR();
   if (key === "a") return kbRequestReview();
 }
 // Repos a bulk action targets: the selection if any, else the cursor row.
@@ -1111,6 +1119,19 @@ function kbReadyForReview() {
   if (!pr) { toast("No draft PR on this repo to mark ready."); return; }
   const btn = (cardEl(r.name) || document).querySelector(`.act-ready-pr[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number) } };
   onReadyForReview(r, btn);
+}
+// Merge the cursor repo's first APPROVED PR that nothing is blocking. When every approved PR
+// is blocked, say why for the first of them — a silent no-op would read as a broken key, and
+// the reason (conflicts, a stack, protection) is the same text its disabled button carries.
+function kbMergePR() {
+  const r = cursorRepo();
+  if (!r) return;
+  const approved = (r.openPRs || []).filter((p) => p.reviewDecision === "APPROVED");
+  if (!approved.length) { toast("No approved PR on this repo to merge."); return; }
+  const pr = approved.find((p) => !mergeBlockedReason(p, r));
+  if (!pr) { toast(`#${approved[0].number}: ${mergeBlockedReason(approved[0], r)}`); return; }
+  const btn = (cardEl(r.name) || document).querySelector(`.act-merge-pr[data-number="${pr.number}"]`) || { dataset: { number: String(pr.number) } };
+  onMergePR(r, btn);
 }
 function kbRequestReview() {
   const r = cursorRepo();
@@ -1404,6 +1425,7 @@ function showShortcutHelp() {
       [k("R"), "roll up ready PRs into one release PR"],
       [k("c"), "review comments (first PR with feedback)"],
       [onUntriaged ? "" : k("m"), onUntriaged ? "" : "mark a draft PR ready for review"],
+      [k("M"), "merge an approved PR (first mergeable one)"],
       [k("a"), "assign / request review (first eligible PR)"],
       [k("p"), "protect the branch"],
       [k("f"), "fix failing CI"],
@@ -1438,8 +1460,8 @@ function toast(msg) {
 function tabActionKeys() {
   if (STATE.tab === "compliance") return "e#rpmwi";
   // Untriaged adds the Track-as keys (w/i) and rebinds m to Maintain — see navAction.
-  if (STATE.tab === "untriaged") return "e#rupfURcamwi";
-  return "e#rupfURcma";
+  if (STATE.tab === "untriaged") return "e#rupfURcamwiM";
+  return "e#rupfURcmaM";
 }
 // Two-stage search Esc: the input's first Esc blurs + arms this window; a second Esc
 // shortly after clears the kept term. Placed before the compRows guard so it still works
@@ -1642,7 +1664,9 @@ function complianceRow(r, idx) {
     db = ` <span class="db-blocked" title="Dependabot can't clone ${esc((r.dependabot.blockedBy || []).join(", "))}, which this repo depends on from git. Resolution fails, so EVERY dependency update here is silently skipped — security updates too. Grant Dependabot read access to that repo to fix it.">⚠ dependabot blocked</span>`;
   } else if (r.dependabot && r.dependabot.state === "stale") {
     const detail = (r.dependabot.stale || [])
-      .map((s) => `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})`)
+      .map((s) =>
+        `${s.ecosystem}: ${s.ageDays == null ? "never run" : `last ran ${s.ageDays}d ago`} (scheduled ${s.interval})` +
+        (s.atLimit ? ` — ${s.openPRs} open PRs, AT the limit of ${s.prLimit}` : ""))
       .join("\n");
     db = ` <span class="db-stale" title="Configured but not running:\n${esc(detail)}\n\nNo error — Dependabot has simply gone quiet. Usually open-pull-requests-limit is reached, or GitHub paused the schedule.">⏱ dependabot idle</span>`;
   }
@@ -2199,7 +2223,40 @@ function depMeta(r) {
     segs.push(`<span class="dep-meta" title="depends on org repos: ${esc(r.dependsOnOrg.join(", "))}">→ depends on ${esc(fmt(r.dependsOnOrg))}</span>`);
   if (r.dependents && r.dependents.length)
     segs.push(`<span class="dep-meta" title="depended on by: ${esc(r.dependents.join(", "))}">↩ used by ${esc(fmt(r.dependents))}</span>`);
+  const db = dependabotMeta(r);
+  if (db) segs.push(db);
   return segs;
+}
+
+// Open Dependabot version-update PRs — routine bumps with no advisory behind them, which
+// this tool deliberately never acts on. It's a LINK and a count, never a button: the whole
+// point of the scope line is that merging arbitrary majors stays a human decision.
+//
+// Leads with the application-dependency count rather than the total, because github_actions
+// bumps are CI plumbing and rarely the thing that hurts; falling many majors behind on an
+// app dependency is how a future security patch ends up unappliable. Majors and failures are
+// called out for the same reason — they're the ones that rot rather than the ones that queue.
+function dependabotMeta(r) {
+  const d = r.dependabotPRs;
+  if (!d || !d.total) return "";
+  const org = (STATE.model && STATE.model.org) || "";
+  const url = `https://github.com/${org}/${r.name}/pulls?q=${encodeURIComponent("is:pr is:open author:app/dependabot")}`;
+  const bits = [];
+  if (d.app) bits.push(`${d.app} app`);
+  if (d.infra) bits.push(`${d.infra} ci`);
+  if (d.major) bits.push(`<strong class="db-major">${d.major} major</strong>`);
+  if (d.failing) bits.push(`<strong class="db-failing">${d.failing} failing</strong>`);
+  // The tooltip carries the detail the meta line can't: what, and how far behind.
+  const lines = d.prs
+    .slice(0, 12)
+    .map((p) => `#${p.number} ${p.pkg || p.title}${p.from ? ` ${p.from} → ${p.to}` : ""}${p.bump === "major" ? " (major)" : ""}${p.failing ? " ✗" : ""}`);
+  if (d.prs.length > 12) lines.push(`…and ${d.prs.length - 12} more`);
+  const age = d.oldestAt ? `\n\nOldest opened ${relTime(d.oldestAt)}.` : "";
+  return (
+    `<a class="dep-meta db-prs" href="${esc(url)}" target="_blank" rel="noopener" ` +
+    `title="Open Dependabot version-update PRs — routine bumps with no advisory, so this tool leaves them to you:\n${esc(lines.join("\n"))}${esc(age)}">` +
+    `🤖 ${d.total} Dependabot${bits.length ? ` · ${bits.join(" · ")}` : ""}</a>`
+  );
 }
 
 // A PR's review status as a small pill. "Review requested" means a reviewer was actually
@@ -2359,6 +2416,88 @@ function consolidationBanner(r) {
   );
 }
 
+// Why an approved PR can't be merged right now, or null when it can. GitHub's
+// mergeStateStatus is the authority: DIRTY = conflicts with the base, BEHIND = the base moved
+// and the repo requires branches to be up to date, BLOCKED = branch protection isn't
+// satisfied yet (a required check, an unresolved conversation, another approval).
+// CLEAN / HAS_HOOKS / UNSTABLE all merge. An UNKNOWN or absent status (GitHub hasn't computed
+// it yet, or a server too old to poll it) is NOT treated as blocked — the attempt goes through
+// and GitHub's own answer is what the user sees.
+// PRs this tool did NOT open that will collide with ours on merge — same base, same lockfile
+// (flagged in the model by annotateForeignCollisions, which sees every open PR, not just ours).
+// Report-only, deliberately: the consolidation banner's three actions all close, rewrite, or
+// comment on the PRs they touch, and none of that may reach a PR somebody else owns. So this
+// names the clash, links it, and leaves the call to the human — who can talk to the author, or
+// just let whoever merges second hit ⟳ Update branch.
+function foreignCollisionRows(r) {
+  if (!PR_TABS.has(STATE.tab)) return "";
+  // Scope to the PRs this tab is showing, like prChips — a warning about a PR that isn't on
+  // screen reads as belonging to one that is.
+  const mine = (r.openPRs || []).filter(
+    (p) => (p.collidesWith || []).length && prLifecycleState(p, r) === STATE.tab
+  );
+  if (!mine.length) return "";
+  // One row per FOREIGN PR (not per pair): with several of ours hitting the same PR, the thing
+  // to know is that #219 is in the way, once.
+  const byForeign = new Map();
+  for (const p of mine) {
+    for (const f of p.collidesWith) {
+      // Base comes from OUR PR in the pair: a collision is same-base by definition, so this is
+      // the branch they're both racing for (mine[0]'s base would be a guess once a repo has
+      // PRs on more than one base).
+      if (!byForeign.has(f.number)) byForeign.set(f.number, { f, ours: [], base: p.baseRefName });
+      byForeign.get(f.number).ours.push(p.number);
+    }
+  }
+  // A long-lived repo can have several of these at once (crows-nest had two humans plus an
+  // old Electron branch). Show the newest few and count the rest — a wall of amber rows above
+  // the PR is worse than no warning, because it stops being read.
+  const all = [...byForeign.values()].sort((a, b) => b.f.number - a.f.number);
+  const shown = all.slice(0, 3);
+  const more = all.length - shown.length;
+  return shown
+    .map(({ f, ours, base: sharedBase }) => {
+      const who = f.author ? ` by <strong>@${esc(f.author)}</strong>` : "";
+      const locks = f.lockfiles.map((l) => `<code>${esc(l)}</code>`).join(", ");
+      const base = sharedBase || r.defaultBranch || "the base";
+      const link = `<a class="eol-pr-link" href="${esc(f.url)}" target="_blank" rel="noopener" title="${esc(f.title)}">#${f.number} →</a>`;
+      return srow(
+        "warn",
+        `⚠ PR #${f.number}${who}${f.draft ? " <span class=\"pr-meta\">(draft)</span>" : ""} also changes ${locks} on <code>${esc(base)}</code> — ` +
+          `this tool didn't open it, so consolidation can't include it. Whichever of #${f.number} / ${ours.map((n) => "#" + n).join(", ")} merges second needs ⟳ Update branch.`,
+        link
+      );
+    })
+    .join("") +
+    (more
+      ? srow("warn", `⚠ …and ${more} more open PR${more === 1 ? "" : "s"} on this base ${more === 1 ? "changes" : "change"} a lockfile this one also changes.`)
+      : "");
+}
+
+// Open PRs stacked ON this one (their base is its head branch) — the inverse of
+// stackParentNumber. Only sees this tool's PRs, so it's for the heads-up in the confirm
+// dialog; the server re-asks GitHub (which also sees human PRs) before choosing how to merge.
+function stackChildNumbers(pr, r) {
+  const head = pr.headRefName;
+  if (!head) return [];
+  return (r.openPRs || []).filter((p) => p.number !== pr.number && p.baseRefName === head).map((p) => p.number);
+}
+
+function mergeBlockedReason(pr, r) {
+  if (pr.draft) return "This PR is still a draft — mark it ready for review first.";
+  const parent = stackParentNumber(pr, r);
+  if (parent) return `Stacked on #${parent} — this targets that PR's branch, so merging it now wouldn't reach the base. Merge #${parent} first; GitHub then retargets this one.`;
+  if (pr.mergeStateStatus === "DIRTY" || pr.mergeable === "CONFLICTING") return "This branch conflicts with its base — resolve it with ⟳ Rebase & resolve first.";
+  if (pr.mergeStateStatus === "BEHIND") return "This branch is behind its base and the repo requires branches to be up to date — use ⟳ Update branch first.";
+  if (pr.mergeStateStatus === "BLOCKED") {
+    const n = pr.reviewUnresolved || 0;
+    return n > 0
+      ? `GitHub is blocking the merge — ${n} unresolved review comment${n === 1 ? "" : "s"}. Clear ${n === 1 ? "it" : "them"} with 💬 Review.`
+      : "GitHub is blocking the merge — a required check or review isn't satisfied yet. Open the PR to see which.";
+  }
+  return null;
+}
+
 function prChips(r) {
   if (!r.openPRs || !r.openPRs.length) return "";
   // On a PR-lifecycle tab, show only this repo's PRs in that state — the per-PR split. The
@@ -2434,12 +2573,23 @@ function prChips(r) {
       const reviewCommentsBtn = rvN > 0
         ? `<button class="pr-act act-review-comments" data-number="${pr.number}" title="${rvN} unresolved review comment${rvN === 1 ? "" : "s"} (Copilot + reviewers) — open the review console to triage, fix, reply &amp; resolve">💬 Review ${rvN}</button>`
         : "";
+      // The finishing move, on an APPROVED PR only — the Approved tab's whole point. When
+      // something stands in the way (conflicts, a stack, branch protection) the button stays
+      // visible but disabled, saying what to do instead: a merge that GitHub would reject is
+      // better refused here, with the fix named, than fired off to come back as an error.
+      const mergeWhy = pr.reviewDecision === "APPROVED" ? mergeBlockedReason(pr, r) : null;
+      const mergeBtn = pr.reviewDecision !== "APPROVED"
+        ? ""
+        : mergeWhy
+          ? `<button class="pr-act merge" data-number="${pr.number}" disabled title="${esc(mergeWhy)}">🔀 Merge</button>`
+          : `<button class="pr-act merge act-merge-pr" data-number="${pr.number}" title="Merge this approved PR into ${esc(pr.baseRefName || r.defaultBranch || "its base")} on GitHub — squash where the repo allows it, then clean up the branch">🔀 Merge</button>`;
       const right =
         fixBtn +
         rebaseBtn +
         reviewCommentsBtn +
         reviewBtn +
         readyBtn +
+        mergeBtn +
         `<button class="copy-btn act-copy-pr" data-url="${esc(pr.url)}" data-label="${esc(r.nameWithOwner + "#" + pr.number)}" title="Copy linked PR reference">⧉ Copy</button>`;
       const title = (pr.title || "").trim();
       const titleHtml = title
@@ -2750,7 +2900,7 @@ function statusRows(r) {
   const rows =
     eolBadge(r) + protectionRow(r) + dispoBlockedAlert(r) + kickoff +
     classifyPrompt(r) + monitoredStale(r) +
-    consolidationBanner(r) + prChips(r) + dispoBumpNote(r) +
+    consolidationBanner(r) + foreignCollisionRows(r) + prChips(r) + dispoBumpNote(r) +
     dispoCovered(r) + monitoredNotified(r);
   return rows ? `<div class="ar-status">${rows}</div>` : "";
 }
@@ -3220,12 +3370,12 @@ function onOpenReviewPanel(r, btn) { openReviewPanel(r, Number(btn.dataset.numbe
 
 async function openReviewPanel(r, number) {
   const pr = (r.openPRs || []).find((p) => p.number === number);
-  REVIEW = { repo: r.name, nameWithOwner: r.nameWithOwner || r.name, number, prUrl: pr && pr.url, title: (pr && pr.title) || "", threads: null, verdicts: {}, skips: new Set(), cursor: 0, investigating: false, error: null };
+  REVIEW = { repo: r.name, nameWithOwner: r.nameWithOwner || r.name, number, prUrl: pr && pr.url, title: (pr && pr.title) || "", threads: null, verdicts: {}, skips: new Set(), cursor: 0, investigating: false, error: null, chats: {} };
   renderReviewPanel();
   try {
     const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(r.name)}&number=${number}`);
     if (!REVIEW || REVIEW.number !== number) return; // panel closed / switched while loading
-    REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+    REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved);
     REVIEW.cursor = 0;
     renderReviewPanel();
     // Auto-triage the Copilot threads (advisory only — the user still picks + clicks Address).
@@ -3257,18 +3407,106 @@ function reviewThreadHtml(t, i) {
   const verdict = v.verdicts[t.id];
   let badge = "";
   if (t.isCopilot) {
-    if (v.investigating && !verdict) badge = `<span class="rv-verdict pending">investigating…</span>`;
+    if (v.investigating && !verdict) badge = `<span class="rv-verdict pending"><span class="spin tiny"></span>investigating</span>`;
     else if (verdict) badge = `<span class="rv-verdict ${verdict.recommend === "skip" ? "skip" : "fix"}">${verdict.recommend === "skip" ? "⚠ likely skip" : "✅ worth fixing"}</span>`;
   }
-  const reason = verdict && verdict.reason ? `<div class="rv-reason">${esc(verdict.reason)}</div>` : "";
+  // The one-line reason is right for scanning a list and useless the moment you disagree
+  // with it. "Ask" reopens the same judgement with room to answer, and keeps the exchange
+  // going — so a verdict is arguable rather than merely asserted.
+  const chat = (v.chats && v.chats[t.id]) || null;
+  const askBtn = `<button class="rv-ask-btn" data-act="ask" data-id="${esc(t.id)}" title="Ask why — and keep asking">${chat && chat.open ? "hide" : "ask"}</button>`;
+  const reason = verdict && verdict.reason
+    ? `<div class="rv-reason">${esc(verdict.reason)} ${askBtn}</div>`
+    : `<div class="rv-reason muted">${t.isCopilot && v.investigating ? "" : askBtn}</div>`;
   const loc = `${esc(t.path || "")}${t.line ? ":" + t.line : ""}`;
+  // Only when GitHub can no longer place the comment in the current diff (`anchorLost`) —
+  // NOT on the GraphQL isOutdated flag, which goes true as soon as any newer commit exists
+  // and would badge threads GitHub itself still shows as current.
+  const outdated = t.anchorLost
+    ? ` <span class="rv-outdated" title="The line this was written against has changed since — the comment is still unresolved, but the snippet below may be stale">outdated</span>`
+    : "";
   return `<div class="rv-thread${skipped ? " skipped" : ""}${cursor}" data-tid="${esc(t.id)}">
     <label class="rv-skip" title="Leave this comment out of the fix (it stays open)"><input type="checkbox" data-act="skip" data-id="${esc(t.id)}"${skipped ? " checked" : ""}> skip</label>
     <div class="rv-main">
-      <div class="rv-head">${who} · <code>${loc}</code> ${badge} ${t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>` : ""}</div>
+      <div class="rv-head">${who} · <code>${loc}</code>${outdated} ${badge} ${t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>` : ""}</div>
       ${reason}
       <div class="rv-body">${mdInline(t.body || "")}</div>
       ${t.diffHunk ? `<pre class="rv-diff">${esc(t.diffHunk)}</pre>` : ""}
+      ${chat && chat.open ? reviewChatHtml(t, chat) : ""}
+    </div>
+  </div>`;
+}
+
+// Open/close one thread's exchange. The transcript lives in REVIEW so it survives the
+// panel's re-renders, and dies with the panel — this is a conversation about a decision
+// you're making now, not a record worth persisting.
+function toggleReviewChat(threadId) {
+  if (!REVIEW) return;
+  REVIEW.chats = REVIEW.chats || {};
+  const cur = REVIEW.chats[threadId];
+  REVIEW.chats[threadId] = cur
+    ? { ...cur, open: !cur.open }
+    : { open: true, messages: [], pending: false, error: null };
+  renderReviewPanel();
+  if (REVIEW.chats[threadId].open) focusReviewChat(threadId);
+}
+
+// Put the caret back after a re-render, and keep the newest turn in view. Without this every
+// send would bounce focus to the top of the panel and hide the answer that just arrived.
+function focusReviewChat(threadId) {
+  const box = document.querySelector(`.rv-chat-input[data-id="${cssEscape(threadId)}"]`);
+  if (!box) return;
+  box.focus();
+  const chat = box.closest(".rv-chat");
+  if (chat) chat.scrollIntoView({ block: "nearest" });
+}
+
+async function sendReviewChat(threadId) {
+  if (!REVIEW) return;
+  const box = document.querySelector(`.rv-chat-input[data-id="${cssEscape(threadId)}"]`);
+  const question = box ? box.value.trim() : "";
+  const chat = (REVIEW.chats || {})[threadId];
+  if (!chat || chat.pending || !question) return;
+  const thread = (REVIEW.threads || []).find((t) => t.id === threadId);
+  if (!thread) return;
+  chat.messages = [...(chat.messages || []), { role: "user", content: question }];
+  chat.pending = true;
+  chat.error = null;
+  renderReviewPanel();
+  focusReviewChat(threadId);
+  try {
+    const data = await postJSON("/api/review-ask", {
+      repo: REVIEW.repo,
+      number: REVIEW.number,
+      threadId,
+      verdict: REVIEW.verdicts[threadId] || null,
+      messages: chat.messages,
+    });
+    chat.messages = [...chat.messages, { role: "assistant", content: data.reply }];
+  } catch (e) {
+    // Keep the question in the transcript — retyping it to retry would be the annoying part.
+    chat.error = e.message;
+  } finally {
+    chat.pending = false;
+    // The panel may have been closed, or moved to another PR, while the answer was in flight.
+    if (REVIEW && REVIEW.chats && REVIEW.chats[threadId]) { renderReviewPanel(); focusReviewChat(threadId); }
+  }
+}
+
+// One thread's follow-up exchange. Kept inline under the comment rather than in a separate
+// pane: the diff, the verdict and the argument about it belong together, and a side panel
+// would mean losing the comment you are arguing about.
+function reviewChatHtml(t, chat) {
+  const turns = (chat.messages || [])
+    .map((m) => `<div class="rv-turn ${m.role}"><span class="rv-turn-who">${m.role === "user" ? "you" : "claude"}</span><div class="rv-turn-body">${m.role === "user" ? esc(m.content) : mdInline(m.content)}</div></div>`)
+    .join("");
+  const pending = chat.pending ? `<div class="rv-turn assistant"><span class="rv-turn-who">claude</span><div class="rv-turn-body"><span class="spin tiny"></span>thinking</div></div>` : "";
+  const err = chat.error ? `<div class="rv-chat-err">${esc(chat.error)}</div>` : "";
+  return `<div class="rv-chat" data-chat="${esc(t.id)}">
+    ${turns}${pending}${err}
+    <div class="rv-chat-row">
+      <textarea class="rv-chat-input" data-id="${esc(t.id)}" rows="1" placeholder="Why? Ask a follow-up…  (Enter to send, Shift+Enter for a newline)"${chat.pending ? " disabled" : ""}></textarea>
+      <button class="rv-chat-send" data-act="send" data-id="${esc(t.id)}"${chat.pending ? " disabled" : ""}>Send</button>
     </div>
   </div>`;
 }
@@ -3289,6 +3527,15 @@ function renderReviewPanel() {
       if (a.dataset.act === "close") return closeReviewPanel();
       if (a.dataset.act === "address") return addressReview();
       if (a.dataset.act === "investigate") return reinvestigate();
+      if (a.dataset.act === "ask") return toggleReviewChat(a.dataset.id);
+      if (a.dataset.act === "send") return sendReviewChat(a.dataset.id);
+    });
+    // Enter sends, Shift+Enter newlines — the usual chat contract. Bound on the overlay so
+    // it survives the re-render that each turn causes.
+    overlay.addEventListener("keydown", (e) => {
+      const box = e.target.closest && e.target.closest(".rv-chat-input");
+      if (!box) return;
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendReviewChat(box.dataset.id); }
     });
     overlay.addEventListener("change", (e) => {
       const cb = e.target.closest('input[data-act="skip"]');
@@ -3313,7 +3560,7 @@ function renderReviewPanel() {
     : "";
   const titleTxt = `${esc(v.nameWithOwner)} · PR #${v.number}${v.title ? " — " + esc(v.title) : ""}`;
   const investBtn = copilotN > 0
-    ? `<button class="subtle" data-act="investigate"${v.investigating ? " disabled" : ""}>${v.investigating ? "Investigating…" : "↻ Re-investigate Copilot"}</button>`
+    ? `<button class="subtle" data-act="investigate"${v.investigating ? " disabled" : ""}>${v.investigating ? `<span class="spin tiny"></span>Investigating` : "↻ Re-investigate Copilot"}</button>`
     : "";
   overlay.innerHTML =
     `<div class="modal review-modal" role="dialog" aria-modal="true">` +
@@ -3396,7 +3643,7 @@ async function onReviewJobDone(repo) {
   try {
     const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(repo)}&number=${REVIEW.number}`);
     if (REVIEW && REVIEW.repo === repo) {
-      REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+      REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved);
       REVIEW.cursor = Math.min(REVIEW.cursor || 0, Math.max(0, REVIEW.threads.length - 1));
       renderReviewPanel();
     }
@@ -3457,6 +3704,10 @@ function reviewKeydown(e) {
   if (!REVIEW) return;
   if (document.querySelector(".confirm-overlay")) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return; // leave browser/OS combos alone
+  // The console's shortcuts are bare letters, so anything typed into the ask box would move
+  // the cursor instead of appearing in the field. Escape still gets through, to leave.
+  const t = e.target;
+  if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT" || t.isContentEditable) && e.key !== "Escape") return;
   const k = e.key;
   if (k === "Escape") { e.preventDefault(); return closeReviewPanel(); }
   if (k === "j" || k === "ArrowDown") { e.preventDefault(); return moveReviewCursor(1); }
@@ -3542,6 +3793,69 @@ async function onReadyForReview(r, btn) {
     btn.disabled = false;
     btn.innerHTML = old;
     alert("Couldn't mark ready: " + e.message);
+  }
+}
+
+// Merge one approved PR. Always confirms — a merge is irreversible, so this deliberately
+// has no "don't ask again" key, unlike Archive. The server re-reads the PR from GitHub and
+// picks a merge method the repo allows, so the outcome it reports back (method, whether the
+// branch went) is what the toast states rather than what we assumed here.
+async function onMergePR(r, btn) {
+  const number = Number(btn.dataset.number);
+  const pr = (r.openPRs || []).find((p) => p.number === number);
+  const base = (pr && pr.baseRefName) || r.defaultBranch || "the base branch";
+  const ciState = pr && pr.ci && pr.ci.state;
+  // Approval doesn't imply green: an approved PR can still be sitting on failing or
+  // in-flight checks. Say so in the modal (and make it a red confirm) rather than letting a
+  // one-word button quietly ship a red build.
+  const ciNote =
+    ciState === "failing"
+      ? `\n\n⚠️ Checks are FAILING on this PR${pr.ci.failing && pr.ci.failing.length ? ` (${pr.ci.failing.join(", ")})` : ""} — merging anyway ships a red build.`
+      : ciState === "pending"
+        ? "\n\nChecks are still running — merging now doesn't wait for them."
+        : "";
+  // Bottom of a stack: squashing would rewrite the commits the PRs above are built on and
+  // strand them, so this merges as a merge commit and keeps the branch. Say so up front —
+  // it's a visible departure from "squash and delete the branch".
+  const kids = pr ? stackChildNumbers(pr, r) : [];
+  const stackNote = kids.length
+    ? `\n\n🥞 ${kids.map((n) => "#" + n).join(", ")} ${kids.length === 1 ? "is" : "are"} stacked on this one, so it merges as a merge commit (not a squash) and keeps the branch — squashing would rewrite the commits ${kids.length === 1 ? "that PR is" : "those PRs are"} built on.`
+    : "";
+  const ok = await confirmModal({
+    message:
+      `Merge PR #${number} into ${base}?\n\n` +
+      `${r.nameWithOwner || r.name}${pr && pr.title ? ` · ${pr.title}` : ""}\n\n` +
+      (kids.length
+        ? `Merges it on GitHub. Branch protection still applies — this never bypasses it.`
+        : `Merges it on GitHub (squash where the repo allows it) and deletes the branch. Branch protection still applies — this never bypasses it.`) +
+      stackNote +
+      ciNote,
+    danger: ciState === "failing",
+    confirmLabel: "Merge PR",
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.textContent = "Merging…";
+  try {
+    const data = await postJSON("/api/merge-pr", { repo: r.name, number });
+    // Drop the merged PR locally so the card leaves the Approved tab immediately — the same
+    // move the server just made to its cache, so the next poll agrees instead of resurrecting it.
+    r.openPRs = (r.openPRs || []).filter((p) => p.number !== number);
+    r.pending = r.openPRs.length > 0;
+    const how = { squash: "Squash-merged", merge: "Merged", rebase: "Rebase-merged" }[data.method] || "Merged";
+    // The server's stack check queries GitHub, so it sees children the model can't (a human's
+    // branch based on ours). When it kept the branch for one, say so — otherwise "merged" reads
+    // as if the usual delete-the-branch cleanup happened, and it deliberately didn't.
+    const kept = !data.branchDeleted && (data.stackedChildren || []).length
+      ? ` · branch kept for ${data.stackedChildren.map((n) => "#" + n).join(", ")}`
+      : "";
+    toast(`✓ ${how} #${number} into ${data.base || base}${kept}${r.pending ? "" : " — Refresh to re-scan this repo's alerts"}`);
+    scheduleRender();
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = old;
+    alert("Couldn't merge: " + e.message);
   }
 }
 
@@ -3715,6 +4029,7 @@ function card(r, nesting) {
   // handler reads the right data-number — `on()` only binds the first match + passes the card.
   el.querySelectorAll(".act-rebase").forEach((b) => b.addEventListener("click", () => onRebase(r, b)));
   el.querySelectorAll(".act-review-comments").forEach((b) => b.addEventListener("click", () => onOpenReviewPanel(r, b)));
+  el.querySelectorAll(".act-merge-pr").forEach((b) => b.addEventListener("click", () => onMergePR(r, b)));
   const fix = el.querySelector(".ci-fix-btn");
   if (fix) fix.addEventListener("click", () => onFixCI(r));
   el.querySelectorAll(".eol-upgrade-btn").forEach((b) => b.addEventListener("click", () => onUpgradeRuntime(r, b.dataset.id)));

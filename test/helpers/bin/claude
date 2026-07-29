@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+"use strict";
+
+// A stand-in for the `claude` CLI, on PATH alongside the `gh` stub.
+//
+// Several routes launch a headless Claude session (rollup, consolidate, rebase, CI fix,
+// constraint bump). Without this, a test that got further than expected would spawn a REAL
+// session against the developer's account — billed, slow, and pointed at a scratch checkout.
+// Shadowing the binary makes that impossible rather than unlikely.
+//
+// It records the invocation and exits non-zero, so a job that reaches it fails visibly instead
+// of appearing to succeed. Tests assert `claudeArgs()` is EMPTY: for a route like rollup, the
+// job aborting before any session is the correct outcome, and "no session was launched" is a
+// property worth asserting rather than assuming.
+
+const fs = require("fs");
+const path = require("path");
+
+const DIR = process.env.GH_STUB_DIR || "";
+if (DIR) {
+  try { fs.appendFileSync(path.join(DIR, "claude.log"), process.argv.slice(2).join(" ") + "\n"); }
+  catch { /* best effort */ }
+}
+
+process.stderr.write("claude: stubbed in tests — no session was run\n");
+process.exit(1);

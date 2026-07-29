@@ -76,11 +76,73 @@ potentially breaking) version bumps would both dilute the audit trail and risk
 breakage. Routine upgrades stay a human decision — review and merge them on GitHub,
 or let Dependabot auto-merge if you configure it.
 
+Not acting on them isn't a reason to hide them, though. Each card's meta line carries a
+count of the repo's open Dependabot version-update PRs — **🤖 12 Dependabot · 9 app · 3 ci
+· 2 major · 2 failing** — linking to that repo's filtered PR list. It's a link and a count,
+never a button.
+
+The split is the point. `github_actions` bumps are CI plumbing; an **app** dependency
+drifting several majors behind is what eventually makes a security patch unappliable, which
+is squarely this tool's problem. Majors and failures are called out for the same reason —
+they're the ones that rot rather than the ones that merely queue. And enough open PRs in one
+ecosystem silently trips `open-pull-requests-limit`, which stops Dependabot running that
+ecosystem at all; the count is what lets the
+[idle detector](#-idle--a-configured-ecosystem-stopped-running) say *"5 open PRs, at the
+limit of 5"* instead of just *"quiet for 105 days"*.
+
+This costs no extra request: `fetchToolPRs` already lists every open PR per repo to find its
+own, and used to discard the rest.
+
 The one place the tool *interacts* with those version-update PRs is read-only/advisory:
 on a no-change re-check it may comment `@dependabot recreate` on a `dependabot/*` PR
 **only when that PR's target is already satisfied on the default branch** (i.e. it's
 superseded) — see [Create update PR](#create-update-pr). It never opens, edits, or
 merges a version-update PR.
+
+## Tests
+
+```bash
+npm test
+```
+
+Node's built-in runner (`node --test`) — **no test dependencies**, matching the zero-dependency
+runtime. Tests live in `test/`.
+
+The interesting part is `test/helpers/`. Routes here do irreversible things to real
+repositories — merge, close, rewrite branches, dismiss alerts — so they can't be tested against
+GitHub, and testing a reimplementation of them proves nothing. Instead:
+
+- **`test/helpers/bin/gh`** is a stand-in for the `gh` CLI, put first on `PATH`. It serves small
+  literal fixtures chosen by a scenario name, and appends **every invocation** to a log.
+- **`test/helpers/bin/claude`** shadows the `claude` CLI the same way. Several routes launch a
+  headless session; without this, a test that got further than expected would spawn a **real**
+  one against your account. It records the call and exits non-zero, so tests can assert that no
+  session was launched rather than assume it.
+- **`test/helpers/harness.js`** boots the **real `server.js`** against them — from a copy in a
+  temp dir, since the server resolves `config.json` and its state files from its own `__dirname`
+  and would otherwise read your real config and write your real state. Each test gets its own
+  server and temp dir, so a route that mutates the model cache can't leak into the next one.
+
+So a test exercises genuine route code with no network and no victim repo. Assertions go on the
+**recorded `gh` argv**, not just the response body: the body only proves the server *reported* a
+merge, while the argv proves it asked for the right one — `--squash` vs `--merge`,
+`--delete-branch` or not, and `--admin` never. That distinction is where the real bugs were.
+
+Routes that start a **background job** (rollup, consolidate, rebase) answer immediately with a
+job id, so the harness also exposes `waitForJob()` and `events()` — the latter subscribes to the
+job's NDJSON stream, which is the only place per-PR ordering and the session's decisions are
+visible. Subscribe *before* calling the route: the server replays a still-active job's buffered
+events on connect, but a finished job is gone.
+
+Covered today: **`/api/merge-pr`** and **`/api/rollup`**. Adding a case usually means one new
+`scenario` branch in the stub. The pattern generalises to the rest (`/api/consolidate`,
+`/api/rebase`, `/api/dismiss-alerts`), which are shaped the same way.
+
+A note on writing these: check that a test **fails when the thing it names is broken**. Two of
+these were initially green against deliberately broken code — one because the fixture happened
+to list PRs in the order the test requested, making a sort a no-op, and one because the mutation
+patched an identically-worded filter elsewhere in the file. Neither would have been caught by
+reading them.
 
 ## Prerequisites
 
@@ -241,7 +303,7 @@ and render as compact rows below the alerted cards.
 | **Maintained** | Active client / we host — repos we actually patch. |
 | **Pending PR** | Has an open tool-opened PR whose CI is still running, failing, or being fixed. Takes precedence over every other tab, whatever the classification. |
 | **Passing PR** | Has an open tool-opened PR with **green CI** but no approval yet — awaiting review. Hidden when empty. |
-| **Approved PR** | Has an open tool-opened PR that's **approved** — ready to merge. Hidden when empty. |
+| **Approved PR** | Has an open tool-opened PR that's **approved** — ready to merge, with a per-PR [**🔀 Merge**](#-merge-per-pr) button. Hidden when empty. |
 | **Covered** | A maintained **gem** whose constraints already permit every patch — no action needed. Hidden when empty. |
 | **Monitored** | Inactive client we watch but don't patch — we notify them instead. |
 | **Notified** | A monitored repo whose client we've emailed, with no new advisories since. |
@@ -452,7 +514,7 @@ auto-fills the greeting and recipient.
 appears later, the card flips to *"N new advisories since you notified — re-notify
 recommended"* and the repo returns to **Monitored**.
 
-## Finishing open PRs — consolidate, rebase, review
+## Finishing open PRs — consolidate, rebase, review, merge
 
 Once a repo has open tool PRs, a few actions help drive them to merge. They appear on the
 Pending / Passing / Approved tabs.
@@ -481,6 +543,62 @@ authoritative) and offers three ways out on the card banner; you pick per repo:
 Stacked / sequenced PRs carry a **🥞 stacked on #N** / **⏱ after #N** badge, and the banner
 stops offering to consolidate PRs that are already linked — so it's clear which way a clash
 was resolved and you can't double-apply it.
+
+### ⚠ Collisions with PRs this tool didn't open
+
+The consolidation cluster only ever considers **our own** PRs, and has to: rollup *closes* the
+originals, stack *rewrites* their branches, sequence *comments* on them, and none of that may
+reach a PR someone else owns. That safety rule left a blind spot — a human's PR changing the
+same lockfile on the same base was invisible, so the dashboard couldn't see a conflict coming
+even though it was certain.
+
+It's now flagged. `annotateForeignCollisions` (`lib/github.js`) splits the repo's open PRs
+instead of filtering them, so the ones we didn't open are still examined for a shared
+base + lockfile. Matches render as an amber row above the PR, naming the PR, its author, and
+the lockfile, with a link. **Report only** — there is no button, because there is no action
+this tool may safely take on someone else's branch. Either talk to the author, or let whoever
+merges second hit **⟳ Update branch**. Costs no extra API call: `gh pr list` already returned
+every open PR and the non-tool ones were simply being discarded.
+
+**Dependabot's own PRs are excluded**, and not just to cut noise. They collide with a
+consolidated remediation PR *by construction* — superseding them is the whole point, which is
+what `nudgeDependabotOnClear` retires them for — and Dependabot rebases its own PR when the
+base moves, so "one of you has to rebase" is never true of them. Measured on one real repo: 15
+collisions, 13 of them Dependabot. Reporting those would fire on every repo forever and bury
+the two human PRs that actually needed a conversation. At most three are shown (newest first),
+then a count.
+
+Two known limits. Lockfiles match on **basename**, so a monorepo's `web/Gemfile.lock` and
+`api/Gemfile.lock` count as the same file — inherited deliberately from the existing cluster
+logic, since matching foreign PRs by a different rule than our own would be worse. It
+over-reports rather than under-reports. And the check runs with the **model build**, not the
+10s CI poll (same as the `lockfiles` it depends on) — so a PR someone opens mid-session shows
+up on the next **Refresh**, not instantly.
+
+### GitHub-native Stacked PRs
+
+GitHub's own [Stacked PRs](https://github.github.com/gh-stack/) (private preview since April
+2026, enabled per repository) overlap this tool's **Stack** strategy — and the dashboard
+already coexists with them, because it reads stacks from the **live base chain** rather than
+from its own records: `stackParentNumber` asks "is this PR's base another open PR's head
+branch?", which is true of a native stack, a `gh stack`-made stack, this tool's Stack, and a
+human who just based one branch on another. All of them badge as **🥞 stacked on #N**, and the
+[Merge](#-merge-per-pr) button treats all of them the same way.
+
+What GitHub's feature gives you that this tool doesn't: base retargeting as a first-class
+object, CI and branch protection evaluated against the *final* target rather than the direct
+base, and a single click that merges a PR plus every unmerged PR below it, bottom-up.
+
+What it does **not** do — and the reason Stack and Rollup still exist here — is regenerate a
+**lockfile**. Two dependency PRs off the same base each rewrite `package-lock.json` /
+`Gemfile.lock` wholesale; that's a semantic conflict no stacking mechanism can resolve, because
+resolving it means *running the package manager*. Stacking arranges the review order; the
+headless session is what makes the lockfile correct at each layer. So the two compose rather
+than compete: native stacks can own the plumbing, and this tool still has to own the content.
+
+One caveat worth knowing before merging a stack from anywhere: **squash and rebase merges
+rewrite commit hashes**, which strands the PRs above (see
+[Merge](#-merge-per-pr) for the mechanics and what the dashboard does about it).
 
 ### ⟳ Rebase / Update branch (per PR)
 
@@ -515,11 +633,69 @@ supported and requested as `org/slug`.
 A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
 console (`lib/reviews.js`). It lists every thread (Copilot 🤖 / human 👤 with file:line + diff
 context), auto-triages the **Copilot** ones with an advisory *fix / skip* suggestion, and lets
-you **skip** any. Hitting **Address** runs one headless session that, per comment, either makes
+you **skip** any. Each verdict carries an **ask** button that opens a
+follow-up conversation about that one comment — the triage reason is a single line, which is
+fine for scanning and useless the moment you disagree with it. The exchange is seeded with
+the comment, its diff, and the verdict being questioned, so it can defend or revise it
+(`POST /api/review-ask`). It's stateless: the panel owns the transcript and posts it back
+each turn, and it's discarded when the panel closes.
+
+The count is *unresolved*, not *unresolved and current*. A thread goes **outdated** when
+the line it was anchored to changes — which this tool does constantly, since every CI fix,
+rebase and rollup rewrites lines. Outdated means the code moved, not that anyone answered
+the comment, and GitHub still counts these as unresolved conversations. They stay in the
+console, labelled `outdated` so it's clear the quoted diff may no longer match the file. Hitting **Address** runs one headless session that, per comment, either makes
 the smallest reasonable fix **or rejects it** (when the comment is wrong / out of scope) —
 then pushes and **replies to + resolves each thread** with a tailored note (the fix's commit,
 or the reason it was rejected). Skipped comments stay open. Keyboard: `j`/`k` move, `x` skip,
 `a` address, `h`/`l` prev/next PR, `o` open, `esc` close.
+
+### 🔀 Merge (per PR)
+
+The last step, on the **Approved** tab: every approved PR carries a **🔀 Merge** button
+(shortcut `M` merges the cursor repo's first mergeable approved PR). It confirms first —
+always, with no "don't ask again" — then merges on GitHub and deletes the head branch. The
+card drops out of Approved immediately; run **Refresh** to re-scan the repo's alerts once
+GitHub has closed them.
+
+**It never bypasses branch protection** — no `--admin`, ever. If GitHub refuses the merge, the
+refusal is what you see. The merge method isn't assumed either: the repo's own
+`squashMergeAllowed` / `mergeCommitAllowed` / `rebaseMergeAllowed` are read first and the
+preferred method (`mergeMethod`, default **squash** — a dependency bump reads best as one
+commit) is used only if the repo allows it, otherwise the next one that's allowed. The toast
+reports what actually happened.
+
+**Merging the bottom of a stack overrides that to a merge commit**, and keeps the branch. A
+stacked child's branch is built *on* these commits; squash and rebase both replace them with
+new hashes, so the child would be left carrying commits its base no longer has — its diff
+balloons back to include this PR's changes and it conflicts on merge. A merge commit keeps
+them reachable, so the child stays a clean delta. This applies to a stack made any way — the
+dashboard's own [Stack](#consolidate-colliding-prs--rollup--stack--sequence) strategy, a
+[GitHub-native stack](#github-native-stacked-prs), or a human who just based their branch on a
+dependency PR. "Is anything stacked on this?" is asked of **GitHub** (`gh pr list --base <head>`),
+not the cached model, precisely so a non-tool PR still counts. The confirm dialog says when
+this is happening and why.
+
+When something stands in the way the button stays visible but **disabled, saying what to do
+instead** — rather than firing a merge GitHub would only bounce back:
+
+| State | What the button says |
+| --- | --- |
+| **DIRTY** / conflicting | resolve it with **⟳ Rebase & resolve** first |
+| **BEHIND** | the repo requires up-to-date branches — use **⟳ Update branch** first |
+| **BLOCKED** | protection isn't satisfied; names the unresolved review threads when that's why |
+| **stacked on #N** | this targets that PR's branch — merge #N first, GitHub then retargets this one |
+| draft | mark it ready for review first |
+
+An *unknown* or not-yet-computed merge state is deliberately **not** treated as blocked: the
+attempt goes through and GitHub's answer is the one reported.
+
+Server-side (`POST /api/merge-pr`) every input is re-read from GitHub before merging — this is
+irreversible, so a stale cache never decides what gets merged. It refuses a PR that isn't open,
+is a draft, has changes requested, or **isn't on one of this tool's branches** (`isToolBranch`)
+— a number that resolves to a human's PR is a bug, not an instruction. The head branch is kept
+(not deleted) while another open PR is stacked on it, so the merge can't orphan the child.
+Approval doesn't imply green CI, so the confirm dialog names any failing checks and turns red.
 
 ### 🗒 Session log
 
@@ -741,7 +917,9 @@ git-ignored, so your settings stay local):
 | `maxConcurrentUpdates` | `3` | update/upgrade/bump jobs run at once (env `MAX_CONCURRENT_UPDATES` overrides) |
 | `maxConcurrentFixes` | `1` | CI-fix jobs run at once (a pool separate from updates) |
 | `autoFixCI` | `false` | auto-launch a headless Claude fix when a pending PR's CI fails |
-| `ciPollSeconds` | `90` | how often to poll pending PRs' CI (min 30) |
+| `mergeMethod` | `squash` | preferred method for the **🔀 Merge** button (`squash` / `merge` / `rebase`); falls back to whatever the repo actually allows |
+| `deleteBranchOnMerge` | `true` | delete the head branch after a dashboard merge (kept regardless while another open PR is stacked on it) |
+| `ciPollSeconds` | `10` | how often to poll pending PRs' CI + review state (min 5). One GraphQL call batches every pending PR per cycle, which is what makes a cadence this fast cheap |
 | `claudeFix` | *(object)* | CI-fix session: `permissionMode`, `timeoutMinutes` (12), and attempt caps `maxAttemptsPerSha` (2) / `maxAttemptsPerRepo` (4) |
 | `autoUpgradeEOL` | `false` | auto-open a runtime-upgrade PR for **maintained** repos on an EOL runtime |
 | `eolPollHours` | `12` | how often to re-scan runtimes against endoflife.date (min 1) |

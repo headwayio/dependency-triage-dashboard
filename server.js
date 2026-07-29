@@ -78,6 +78,8 @@ function loadConfig() {
     emailHourlyRate: 200,
     npm: { force: false },
     autoFixCI: false, // when true, auto-launch a headless Claude fix on a failing PR
+    mergeMethod: "squash", // Merge button: squash | merge | rebase — falls back to whatever the repo allows
+    deleteBranchOnMerge: true, // delete the PR's head branch after a dashboard merge
     ciPollSeconds: 10,
     maxConcurrentFixes: 1,
     claudeFix: { permissionMode: "auto", timeoutMinutes: 12, maxAttemptsPerSha: 2, maxAttemptsPerRepo: 4 },
@@ -240,6 +242,16 @@ async function enrichCompliance(orgRepos, force) {
           dependabot.staleEcosystems(r.dependabotConfig, r.dependabotRuns, now)
         ),
       };
+    }
+    // Only now, and only for the repos that came back stale, ask why. The staleness check
+    // says an ecosystem went quiet but not what silenced it, and the commonest answer —
+    // its open PRs are at `open-pull-requests-limit` — needs one extra listing per repo.
+    // Scoping it to the flagged set keeps that proportional to the problem, not the org.
+    for (const r of work) {
+      const v = out[r.name].dependabot;
+      if (!(v.stale || []).length) continue;
+      const counts = await dependabot.fetchPrCounts(config.org, r.name);
+      v.stale = dependabot.annotateStaleCause(v.stale, r.dependabotConfig, counts);
     }
     for (const name of Object.keys(dependents)) {
       out[name] = out[name] || {};
@@ -1483,6 +1495,89 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { jobId: job.id, repo, number: num, branch });
     }
 
+    // Merge one approved PR — the Approved tab's finishing action. Every input is re-read
+    // from GitHub first: this is irreversible, so a possibly-stale cache must never be what
+    // decides which PR gets merged. Branch protection still applies — we never pass --admin.
+    if (req.method === "POST" && route === "/api/merge-pr") {
+      const { repo, number } = await repoBody(req);
+      const num = Number(number);
+      if (!Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "Valid PR number required." });
+      const r = await repoFromModel(repo);
+      const nwo = `${config.org}/${repo}`;
+      const view = await run("gh", ["pr", "view", String(num), "--repo", nwo, "--json",
+        "number,state,isDraft,title,url,headRefName,baseRefName,reviewDecision"]);
+      if (view.code !== 0) return sendJSON(res, 502, { error: (view.stderr || `gh pr view #${num} failed`).trim() });
+      let pr = null;
+      try { pr = JSON.parse(view.stdout.trim() || "null"); } catch { pr = null; }
+      if (!pr) return sendJSON(res, 404, { error: `Couldn't read PR #${num} on ${nwo}.` });
+      if (pr.state !== "OPEN") return sendJSON(res, 409, { error: `PR #${num} is ${String(pr.state).toLowerCase()}, not open.` });
+      if (pr.isDraft) return sendJSON(res, 409, { error: `PR #${num} is still a draft — mark it ready for review first.` });
+      // Only ever merge OUR branches. The dashboard shows nothing but tool PRs, so a number
+      // that resolves to a human's PR means a stale client (or a typo) — refuse rather than
+      // merge someone else's work on their behalf.
+      if (!gh.isToolBranch(pr.headRefName, config.branchPrefix)) {
+        return sendJSON(res, 409, { error: `PR #${num} (${pr.headRefName}) isn't a branch this tool opened — merge it on GitHub.` });
+      }
+      // An approval can be withdrawn between the render and the click. A definite "no" stops
+      // us; anything else is left to branch protection, which is the real gate.
+      if (pr.reviewDecision === "CHANGES_REQUESTED") {
+        return sendJSON(res, 409, { error: `PR #${num} has changes requested — address the review first.` });
+      }
+      // Merge with a method the repo actually allows: `gh pr merge --squash` simply errors on
+      // a squash-disabled repo, so ask rather than assume. Preference starts at the configured
+      // method (default squash — a dependency bump reads best as one commit) and falls back
+      // through the others. An unreadable capability answer (older gh, transient failure)
+      // leaves every flag undefined; then just try the preferred method and let GitHub decide.
+      const FLAG = { squash: "--squash", merge: "--merge", rebase: "--rebase" };
+      const caps = await run("gh", ["repo", "view", nwo, "--json", "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed"]);
+      let allow = {};
+      try { allow = JSON.parse(caps.stdout.trim() || "{}"); } catch { allow = {}; }
+      const allowed = { squash: allow.squashMergeAllowed, merge: allow.mergeCommitAllowed, rebase: allow.rebaseMergeAllowed };
+      // Is anything STACKED on this PR — another open PR whose base is this head branch?
+      // Asked of GitHub, not the cached model: the cache holds only this tool's PRs, so a
+      // human's PR (or a native GitHub stack) built on a dependency branch would be invisible
+      // to it, and both are exactly what must not be broken here.
+      const kidsOut = await run("gh", ["pr", "list", "--repo", nwo, "--state", "open", "--base", pr.headRefName, "--json", "number"]);
+      let kids = [];
+      try { kids = JSON.parse(kidsOut.stdout.trim() || "[]").filter((p) => p.number !== num); } catch { kids = []; }
+      const child = kids.length > 0;
+      // A stacked child's branch is built ON these commits. Squash and rebase both replace
+      // them with new hashes, so the child is left carrying commits its base no longer has:
+      // its diff balloons back to include this PR's changes and it conflicts on merge (the
+      // same reason squash-merging strands any stack). A merge commit keeps them reachable,
+      // so the child stays a clean delta. So a stack parent overrides the configured method.
+      const prefer = child ? "merge" : FLAG[config.mergeMethod] ? config.mergeMethod : "squash";
+      // "Did the capability call answer at all?" — NOT "is anything allowed?". A repo with
+      // every method disabled must fall through to the 409 below, so testing for a `true`
+      // here would read that as "unreadable" and merge with the preferred method anyway.
+      const known = Object.values(allowed).some((v) => typeof v === "boolean");
+      const method = known ? [prefer, "squash", "merge", "rebase"].find((m) => allowed[m] === true) : prefer;
+      if (!method) return sendJSON(res, 409, { error: `${nwo} allows no merge method — enable one in the repo's settings.` });
+      // Deleting the head branch is the tidy default, but NOT while something is stacked on it:
+      // GitHub retargets the child onto this PR's base as part of the merge, and yanking the
+      // branch in the same breath risks closing it.
+      const deleteBranch = config.deleteBranchOnMerge !== false && !child;
+      const args = ["pr", "merge", String(num), "--repo", nwo, FLAG[method]];
+      if (deleteBranch) args.push("--delete-branch");
+      const out = await run("gh", args);
+      if (out.code !== 0) return sendJSON(res, 502, { error: (out.stderr || out.stdout || "gh pr merge failed").trim() });
+      // Drop it from the cache: the repo leaves the PR-lifecycle tabs at once, the CI poll
+      // stops polling a merged PR, and the sequence poller sees the blocker as gone — which
+      // is what triggers the auto-rebase of whatever was waiting on it. Run that poll now so
+      // the follower rebases immediately instead of up to a cycle later.
+      r.openPRs = (r.openPRs || []).filter((p) => p.number !== num);
+      r.pending = r.openPRs.length > 0;
+      if (!r.openPRs.length) ciStatus.delete(repo);
+      state.clearPrLink(repo, num);
+      pollSequenceLinks().catch(() => {});
+      console.log(`  ${repo}: merged PR #${num} (${method})${deleteBranch ? " + deleted branch" : ""}.`);
+      return sendJSON(res, 200, {
+        repo, number: num, merged: true, method, branchDeleted: deleteBranch,
+        stackedChildren: kids.map((p) => p.number),
+        base: pr.baseRefName || null, title: pr.title || "", url: pr.url || "",
+      });
+    }
+
     // Past headless-session logs for one repo (newest first) — powers the card's
     // "Session log" viewer so a run's output is reviewable after it finishes.
     if (req.method === "GET" && route === "/api/session-history") {
@@ -1512,6 +1607,25 @@ const server = http.createServer(async (req, res) => {
       const threads = await reviews.fetchReviewThreads(nwo, num);
       const verdicts = await reviews.investigateThreads(nwo, threads);
       return sendJSON(res, 200, { repo, number: num, verdicts });
+    }
+
+    // Follow-up question about ONE thread's verdict. Stateless: the client owns the
+    // transcript and posts it back; the thread is re-read here rather than trusted from the
+    // request, so the answer always concerns the comment as it currently stands.
+    if (req.method === "POST" && route === "/api/review-ask") {
+      const { repo, number, threadId, verdict, messages } = await repoBody(req);
+      const num = Number(number);
+      if (!repo || !Number.isInteger(num) || num <= 0) return sendJSON(res, 400, { error: "repo and number required." });
+      if (!threadId || typeof threadId !== "string") return sendJSON(res, 400, { error: "threadId required." });
+      if (!Array.isArray(messages) || !messages.length) return sendJSON(res, 400, { error: "Ask a question first." });
+      gh.assertRepoName(repo);
+      const nwo = `${config.org}/${repo}`;
+      const threads = await reviews.fetchReviewThreads(nwo, num);
+      const thread = threads.find((t) => t.id === threadId);
+      if (!thread) return sendJSON(res, 404, { error: "That review thread is no longer on the PR." });
+      const reply = await reviews.askAboutThread(nwo, thread, verdict || null, messages);
+      if (!reply) return sendJSON(res, 502, { error: "The assistant didn't answer — try again." });
+      return sendJSON(res, 200, { repo, number: num, threadId, reply });
     }
 
     // Address the selected review threads on a PR via a headless Claude session, then

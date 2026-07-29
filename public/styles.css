@@ -598,6 +598,14 @@ kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11
    not wear it (a green ✓ pill reads as "this PR IS ready", not "click to mark it ready"). */
 .pr-act { white-space: nowrap; font-size: 12px; padding: 3px 10px; border-radius: 6px; }
 .pr-act:disabled { opacity: 0.6; }
+/* Merge is the finishing action on an approved PR, so it's the one .pr-act that takes the
+   filled accent treatment (like Fix CI) — everything else in that slot is a step on the way.
+   Deliberately blue and not green, for the reason above: green here is the "checks passing"
+   status color, and a green button would read as a state ("this IS merged") rather than an
+   action. Blocked → it loses the fill, so an inert control can't out-shout the live buttons
+   beside it (its tooltip carries what to do instead). */
+.pr-act.merge:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.pr-act.merge:not(:disabled):hover { background: #4090ff; }
 
 /* Request-review control: static label + a chip/caret pair that reads as one button.
    The label is text, not part of the hit area — only the name and the caret are clickable,
@@ -785,3 +793,50 @@ button.subtle { color: var(--muted); }
 .ord-pos { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 14px; text-align: right; font-size: 12px; flex: none; }
 .ord-pr { color: var(--accent); font-weight: 600; font-size: 13px; white-space: nowrap; flex: none; }
 .ord-title { flex: 1; min-width: 0; color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Open Dependabot version-update PRs on the card meta line. Deliberately quiet — it's
+   context, not a task — but majors and failures get colour, since those are the ones that
+   turn into a problem rather than just a queue. */
+.db-prs { color: var(--muted); white-space: nowrap; }
+.db-prs:hover { color: var(--text); text-decoration: none; }
+.db-prs .db-major { color: var(--medium); font-weight: 650; }
+.db-prs .db-failing { color: var(--critical); font-weight: 650; }
+.stale-cause { color: var(--medium); }
+/* A review thread whose anchor line has moved. Still unresolved and still actionable — the
+   label only warns that the quoted diff may no longer match the file. */
+.rv-outdated { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--medium); border: 1px solid #4a3f1c; background: var(--medium-bg); border-radius: 4px; padding: 0 5px; cursor: help; }
+
+/* Inline spinner for the review console's investigating states. Sized down from .spin so it
+   sits inside a badge without setting the line height — a static "…" read as stalled,
+   which is exactly the wrong impression while a Claude pass is running. */
+.spin.tiny { width: 9px; height: 9px; border-width: 1.5px; margin-right: 5px; vertical-align: -1px; }
+/* The pending badge holds a spinner now, so it needs to lay out as a row. */
+.rv-verdict.pending { display: inline-flex; align-items: center; }
+
+/* Per-thread follow-up about a triage verdict. Sits inline under the comment: the diff, the
+   verdict and the argument about it belong in one place. */
+.rv-ask-btn {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 1px 8px; border-radius: 20px; margin-left: 6px;
+  color: var(--muted); background: transparent; border: 1px solid var(--border);
+}
+.rv-ask-btn:hover { color: var(--text); border-color: var(--muted); background: var(--panel-2); }
+.rv-chat { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.rv-turn { display: flex; gap: 8px; font-size: 13px; line-height: 1.55; }
+.rv-turn-who {
+  flex: 0 0 46px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); padding-top: 3px;
+}
+.rv-turn.user .rv-turn-body { color: var(--text); }
+.rv-turn.assistant .rv-turn-body { color: #c7d2de; }
+.rv-turn-body { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+.rv-turn-body code { background: rgba(110, 140, 200, 0.16); padding: 0 4px; border-radius: 3px; }
+.rv-chat-row { display: flex; gap: 6px; align-items: flex-end; }
+.rv-chat-input {
+  flex: 1; resize: vertical; min-height: 32px; max-height: 160px;
+  font: inherit; font-size: 13px; padding: 6px 9px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+}
+.rv-chat-input:focus { outline: none; border-color: var(--accent); }
+.rv-chat-send { font-size: 12px; padding: 6px 12px; }
+.rv-chat-err { font-size: 12px; color: var(--critical); }
