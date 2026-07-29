@@ -408,6 +408,17 @@ http.createServer((req, res) => {
   if (route === "/api/pr-status") return json(res, { autoFixCI: true, statuses: ciStatuses, prMeta });
   if (route === "/api/eol-status") return json(res, { autoUpgradeEOL: true, eol: eolStatus });
   if (route === "/api/protection-status") return json(res, { protection });
+  if (route === "/api/review-threads") {
+    return json(res, { threads: [
+      { id: "T1", isResolved: false, isOutdated: true, anchorLost: false, author: "copilot-pull-request-reviewer", isCopilot: true,
+        body: "peerDependencies pinned to an exact version during lockfile generation.",
+        path: "pnpm-lock.yaml", line: 749, diffHunk: "@@ -736,18 +745,18 @@\n-  '@babel/core': ^7.0.0\n+  '@babel/core': 7.29.6",
+        url: "https://github.com/acme-corp/acme-frontend/pull/142#discussion_r1" },
+      { id: "T2", isResolved: false, isOutdated: true, anchorLost: true, author: "caseylee", isCopilot: false,
+        body: "Can we keep the range here?", path: "package.json", line: 12, diffHunk: "",
+        url: "https://github.com/acme-corp/acme-frontend/pull/142#discussion_r2" },
+    ] });
+  }
   if (route === "/api/compliance") return json(res, compliance);
   if (route === "/api/settings") return json(res, settings);
   if (route === "/api/engagement-log") return json(res, { repo: u.searchParams.get("repo"), log: engagementLog[u.searchParams.get("repo")] || [] });
@@ -440,6 +451,11 @@ http.createServer((req, res) => {
       }
       // Reviewer edits echo the resulting set (like the real server) instead of a bare ok —
       // the picker renders from that response, so a canned reply would make it look broken.
+      if (route === "/api/review-investigate") {
+        // Never resolves — parks the panel in the investigating state on purpose, so the
+        // spinner can actually be looked at rather than guessed at.
+        return; // no response
+      }
       if (route === "/api/request-review") {
         // ?nullreviewers=1 mimics the real server answering when the PR is absent from
         // its model cache — it returns reviewers:null and the client must not regress.

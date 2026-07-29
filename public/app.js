@@ -3407,15 +3407,15 @@ function reviewThreadHtml(t, i) {
   const verdict = v.verdicts[t.id];
   let badge = "";
   if (t.isCopilot) {
-    if (v.investigating && !verdict) badge = `<span class="rv-verdict pending">investigating…</span>`;
+    if (v.investigating && !verdict) badge = `<span class="rv-verdict pending"><span class="spin tiny"></span>investigating</span>`;
     else if (verdict) badge = `<span class="rv-verdict ${verdict.recommend === "skip" ? "skip" : "fix"}">${verdict.recommend === "skip" ? "⚠ likely skip" : "✅ worth fixing"}</span>`;
   }
   const reason = verdict && verdict.reason ? `<div class="rv-reason">${esc(verdict.reason)}</div>` : "";
   const loc = `${esc(t.path || "")}${t.line ? ":" + t.line : ""}`;
-  // Outdated = the anchor line changed since the comment was written (our own pushes do
-  // this constantly). Still unaddressed, so it stays in the list — but say so, because the
-  // quoted diff below may no longer match the file.
-  const outdated = t.isOutdated
+  // Only when GitHub can no longer place the comment in the current diff (`anchorLost`) —
+  // NOT on the GraphQL isOutdated flag, which goes true as soon as any newer commit exists
+  // and would badge threads GitHub itself still shows as current.
+  const outdated = t.anchorLost
     ? ` <span class="rv-outdated" title="The line this was written against has changed since — the comment is still unresolved, but the snippet below may be stale">outdated</span>`
     : "";
   return `<div class="rv-thread${skipped ? " skipped" : ""}${cursor}" data-tid="${esc(t.id)}">
@@ -3469,7 +3469,7 @@ function renderReviewPanel() {
     : "";
   const titleTxt = `${esc(v.nameWithOwner)} · PR #${v.number}${v.title ? " — " + esc(v.title) : ""}`;
   const investBtn = copilotN > 0
-    ? `<button class="subtle" data-act="investigate"${v.investigating ? " disabled" : ""}>${v.investigating ? "Investigating…" : "↻ Re-investigate Copilot"}</button>`
+    ? `<button class="subtle" data-act="investigate"${v.investigating ? " disabled" : ""}>${v.investigating ? `<span class="spin tiny"></span>Investigating` : "↻ Re-investigate Copilot"}</button>`
     : "";
   overlay.innerHTML =
     `<div class="modal review-modal" role="dialog" aria-modal="true">` +

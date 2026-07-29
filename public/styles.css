@@ -805,3 +805,10 @@ button.subtle { color: var(--muted); }
 /* A review thread whose anchor line has moved. Still unresolved and still actionable — the
    label only warns that the quoted diff may no longer match the file. */
 .rv-outdated { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--medium); border: 1px solid #4a3f1c; background: var(--medium-bg); border-radius: 4px; padding: 0 5px; cursor: help; }
+
+/* Inline spinner for the review console's investigating states. Sized down from .spin so it
+   sits inside a badge without setting the line height — a static "…" read as stalled,
+   which is exactly the wrong impression while a Claude pass is running. */
+.spin.tiny { width: 9px; height: 9px; border-width: 1.5px; margin-right: 5px; vertical-align: -1px; }
+/* The pending badge holds a spinner now, so it needs to lay out as a row. */
+.rv-verdict.pending { display: inline-flex; align-items: center; }
