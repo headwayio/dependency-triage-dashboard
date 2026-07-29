@@ -3375,7 +3375,7 @@ async function openReviewPanel(r, number) {
   try {
     const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(r.name)}&number=${number}`);
     if (!REVIEW || REVIEW.number !== number) return; // panel closed / switched while loading
-    REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+    REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved);
     REVIEW.cursor = 0;
     renderReviewPanel();
     // Auto-triage the Copilot threads (advisory only — the user still picks + clicks Address).
@@ -3412,10 +3412,16 @@ function reviewThreadHtml(t, i) {
   }
   const reason = verdict && verdict.reason ? `<div class="rv-reason">${esc(verdict.reason)}</div>` : "";
   const loc = `${esc(t.path || "")}${t.line ? ":" + t.line : ""}`;
+  // Outdated = the anchor line changed since the comment was written (our own pushes do
+  // this constantly). Still unaddressed, so it stays in the list — but say so, because the
+  // quoted diff below may no longer match the file.
+  const outdated = t.isOutdated
+    ? ` <span class="rv-outdated" title="The line this was written against has changed since — the comment is still unresolved, but the snippet below may be stale">outdated</span>`
+    : "";
   return `<div class="rv-thread${skipped ? " skipped" : ""}${cursor}" data-tid="${esc(t.id)}">
     <label class="rv-skip" title="Leave this comment out of the fix (it stays open)"><input type="checkbox" data-act="skip" data-id="${esc(t.id)}"${skipped ? " checked" : ""}> skip</label>
     <div class="rv-main">
-      <div class="rv-head">${who} · <code>${loc}</code> ${badge} ${t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>` : ""}</div>
+      <div class="rv-head">${who} · <code>${loc}</code>${outdated} ${badge} ${t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener" title="Open on GitHub">↗</a>` : ""}</div>
       ${reason}
       <div class="rv-body">${mdInline(t.body || "")}</div>
       ${t.diffHunk ? `<pre class="rv-diff">${esc(t.diffHunk)}</pre>` : ""}
@@ -3546,7 +3552,7 @@ async function onReviewJobDone(repo) {
   try {
     const data = await getJSON(`/api/review-threads?repo=${encodeURIComponent(repo)}&number=${REVIEW.number}`);
     if (REVIEW && REVIEW.repo === repo) {
-      REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved && !t.isOutdated);
+      REVIEW.threads = (data.threads || []).filter((t) => !t.isResolved);
       REVIEW.cursor = Math.min(REVIEW.cursor || 0, Math.max(0, REVIEW.threads.length - 1));
       renderReviewPanel();
     }

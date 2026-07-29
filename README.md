@@ -633,7 +633,13 @@ supported and requested as `org/slug`.
 A PR with unresolved review threads shows a **💬 Review N** button that opens a per-PR
 console (`lib/reviews.js`). It lists every thread (Copilot 🤖 / human 👤 with file:line + diff
 context), auto-triages the **Copilot** ones with an advisory *fix / skip* suggestion, and lets
-you **skip** any. Hitting **Address** runs one headless session that, per comment, either makes
+you **skip** any.
+
+The count is *unresolved*, not *unresolved and current*. A thread goes **outdated** when
+the line it was anchored to changes — which this tool does constantly, since every CI fix,
+rebase and rollup rewrites lines. Outdated means the code moved, not that anyone answered
+the comment, and GitHub still counts these as unresolved conversations. They stay in the
+console, labelled `outdated` so it's clear the quoted diff may no longer match the file. Hitting **Address** runs one headless session that, per comment, either makes
 the smallest reasonable fix **or rejects it** (when the comment is wrong / out of scope) —
 then pushes and **replies to + resolves each thread** with a tailored note (the fix's commit,
 or the reason it was rejected). Skipped comments stay open. Keyboard: `j`/`k` move, `x` skip,

@@ -802,3 +802,6 @@ button.subtle { color: var(--muted); }
 .db-prs .db-major { color: var(--medium); font-weight: 650; }
 .db-prs .db-failing { color: var(--critical); font-weight: 650; }
 .stale-cause { color: var(--medium); }
+/* A review thread whose anchor line has moved. Still unresolved and still actionable — the
+   label only warns that the quoted diff may no longer match the file. */
+.rv-outdated { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--medium); border: 1px solid #4a3f1c; background: var(--medium-bg); border-radius: 4px; padding: 0 5px; cursor: help; }

@@ -74,6 +74,18 @@ for (const [n, pr] of Object.entries(PRS)) {
   pr.createdAt = pr.createdAt || `2026-07-${String(10 + (Number(n) % 20)).padStart(2, "0")}T00:00:00Z`;
 }
 
+// Review threads per PR, for the CI/review poll. 57 carries the shape that caused the bug:
+// a thread that is unresolved but OUTDATED. Our own pushes outdate threads constantly, so
+// this is the normal state of a PR that has been fixed once and still has open feedback.
+const THREADS = {
+  57: [
+    { isResolved: false, isOutdated: false }, // plainly open
+    { isResolved: false, isOutdated: true },  // open, but its anchor line moved
+    { isResolved: true, isOutdated: true },   // done — must never count
+  ],
+  90: [{ isResolved: true, isOutdated: false }],
+};
+
 // Which PRs are OPEN on the repo, per scenario. Order here is gh's listing order, so a route
 // that reorders (rollup honors the caller's merge order) can be caught doing it.
 const OPEN_PRS = {
@@ -129,6 +141,30 @@ if (is("api") && joined.includes("dependabot/alerts")) {
     manifest: "requirements.txt", summary: "Vulnerability in cryptography", url: "https://example.test/ghsa",
   }) + "\n");
 }
+// The batched CI + review poll (lib/ci.js fetchPRStatusBatch). It aliases one block per PR
+// as p0, p1, …; answer in the same order by reading the numbers back out of the query.
+if (is("api", "graphql")) {
+  const q = argv.find((a) => a.startsWith("query=")) || "";
+  const nums = [...q.matchAll(/pullRequest\(number:\s*(\d+)\)/g)].map((m) => Number(m[1]));
+  if (!nums.length) out({ data: {} });
+  const data = {};
+  nums.forEach((n, i) => {
+    const pr = PRS[n];
+    data[`p${i}`] = pr
+      ? { pullRequest: {
+          isDraft: pr.isDraft, reviewDecision: pr.reviewDecision, headRefOid: `sha-${n}`,
+          mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", baseRefName: pr.baseRefName,
+          reviewThreads: { nodes: THREADS[n] || [] },
+          reviewRequests: { nodes: [] },
+          commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: [
+            { __typename: "CheckRun", name: "tests", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "" },
+          ] } } } }] },
+        } }
+      : { pullRequest: null };
+  });
+  out({ data });
+}
+
 if (is("api")) out("[]"); // members, contents, and anything else best-effort
 
 if (is("repo", "list")) {
