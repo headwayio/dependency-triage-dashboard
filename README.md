@@ -283,6 +283,43 @@ Then open <http://127.0.0.1:8787>. Press **Refresh** to re-scan GitHub. Client f
 the watcher only needs to restart for server-side changes. (A watch-restart ends any
 in-flight background job, so avoid editing server code mid-run.)
 
+### Sharing state between machines (optional)
+
+The config and state files are git-ignored because this repo is public — they hold
+client names, contacts, and which repos have unpatched advisories. To use the dashboard
+from more than one machine, keep them in a separate **private** git repo instead:
+
+1. Create a private repo, add your `config.json`, `settings.toml`, and state `*.json`
+   files to it, and push.
+2. On each machine, clone it and symlink every file into this checkout:
+
+   ```bash
+   git clone git@github.com:your-org/your-state-repo.git ~/Code/your-state-repo
+   for f in ~/Code/your-state-repo/*.json ~/Code/your-state-repo/settings.toml; do
+     ln -sf "$f" "$(basename "$f")"
+   done
+   ```
+
+3. Set `"stateRepo": "~/Code/your-state-repo"` in `config.json`.
+
+The app then keeps the repo in sync on its own:
+
+- **On startup** it pulls the state repo, before reading `config.json`.
+- **After a save** it waits `stateSyncSeconds` (30) for the burst to settle — bulk
+  triage writes dozens of times in a row — then commits and pushes. The commit message
+  names what changed (*Classify api as maintained*, *Record 12 compliance decisions*)
+  plus `Synced-from: <hostname>`, so the state repo's history doubles as an audit trail
+  of triage and scope decisions.
+- **On Ctrl+C or a watch restart** it commits and pushes anything pending first (up to
+  15s; a second Ctrl+C exits immediately).
+
+It never force-pushes. If the other machine pushed first, your commits are rebased onto
+it. If both changed the same file, the rebase is aborted, your commits stay local, and
+sync **pauses** with a banner in the dashboard until you resolve the conflict in the
+state repo and restart. A network failure doesn't pause; it's retried. Don't run the
+dashboard on two machines at once — sync makes switching painless, but two live copies
+would keep conflicting.
+
 ## How it's organized — tabs & triage
 
 Every repo with open alerts lands in exactly one **tab**. You classify each repo
@@ -926,6 +963,8 @@ git-ignored, so your settings stay local):
 | `autoFixGemConstraints` | `false` | a **blocked** gem auto-opens a constraint-bump PR |
 | `claudeBump` | *(object)* | constraint-bump session: `permissionMode` + `timeoutMinutes` (20) |
 | `emailHourlyRate` | `200` | legacy — the live rate is the Settings panel / `settings.toml` (`estimate.hourly_rate`) |
+| `stateRepo` | `""` | path to a private git repo holding your (symlinked) config + state files; pulled on startup and committed + pushed after saves — see [Sharing state between machines](#sharing-state-between-machines-optional) |
+| `stateSyncSeconds` | `30` | how long after the last save to wait before committing + pushing the state repo |
 | `dismissToken` | `""` | token for the **Dismiss-on-GitHub** calls only — **prefer the `DISMISS_GH_TOKEN` env var or the git-ignored `.dismiss-token` file** over this key (read fresh, no restart; keeps the secret out of your config) — see [Credentials](#credentials--local-setup) |
 | `protection` | *(object)* | SOC 2 branch-protection ruleset: `requiredApprovals` (1), `dismissStaleReviews` / `requireConversationResolution` / `blockForcePush` / `restrictDeletion` (all true), `requireCodeOwnerReview` / `allowAdminBypass` (false), `rulesetName` |
 

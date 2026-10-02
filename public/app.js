@@ -268,6 +268,15 @@ async function loadHealth() {
   }
 }
 
+// State-repo sync problems go in the top banner: a paused sync otherwise only shows up
+// in the server log, and the next machine would quietly start from stale triage state.
+async function loadStateSync() {
+  let s;
+  try { s = await getJSON("/api/state-sync"); } catch { return; }
+  const msg = s.paused ? `State sync is paused. ${s.paused}` : s.error ? `State sync: ${s.error}` : "";
+  $("#banner").innerHTML = msg ? `<div class="banner">${esc(msg)}</div>` : "";
+}
+
 // ---- data -------------------------------------------------------------------
 async function loadRepos(refresh) {
   // The Compliance tab owns its own content + loader, so don't cover it with the
@@ -4703,6 +4712,7 @@ $("#helpBtn").addEventListener("click", showShortcutHelp);
 
 $("#refreshBtn").addEventListener("click", () => {
   loadHealth();
+  loadStateSync();
   loadRepos(true);
   pollEolStatus(true);
   pollProtectionStatus(true);
@@ -4741,6 +4751,8 @@ async function loadEmailMode() {
   await loadEmailMode();
   startEventStream(); // global background-job progress (fire-and-forget loop)
   loadHealth();
+  loadStateSync();
+  setInterval(loadStateSync, 30000);
   await loadRepos(false);
   pollPRStatus(true); // CI status for pending PRs
   pollEolStatus(true); // end-of-life runtime scan

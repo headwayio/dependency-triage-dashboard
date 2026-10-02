@@ -22,9 +22,12 @@ const { createStackPRs, createSequencePlan } = require("./lib/consolidate");
 const reviews = require("./lib/reviews");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
+const stateSync = require("./lib/statesync");
 
 // ---- Config -----------------------------------------------------------------
 const ROOT = __dirname;
+// Pull the state repo (if configured) first: config.json may live in it.
+stateSync.start(ROOT);
 const createdLocalFiles = bootstrapLocalFiles();
 const config = loadConfig();
 const HOST = process.env.HOST || config.host || "127.0.0.1";
@@ -87,6 +90,8 @@ function loadConfig() {
     eolPollHours: 12,
     autoFixGemConstraints: false, // when true, a blocked gem auto-opens a constraint-bump PR
     claudeBump: { permissionMode: "auto", timeoutMinutes: 20 },
+    stateRepo: "", // optional git repo holding the (symlinked) state files; synced on startup + after saves
+    stateSyncSeconds: 30, // wait this long after the last save before committing + pushing
     dismissToken: "", // optional dedicated token for the Dismiss-on-GitHub calls only
                       // (fine-grained PAT with "Dependabot alerts: Read and write").
                       // Falls back to env DISMISS_GH_TOKEN, then to gh's normal auth.
@@ -1075,6 +1080,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Health
+    if (req.method === "GET" && route === "/api/state-sync") {
+      return sendJSON(res, 200, stateSync.status());
+    }
+
     if (req.method === "GET" && route === "/api/health") {
       try {
         const login = await gh.whoami();
@@ -2036,6 +2045,10 @@ server.listen(PORT, HOST, () => {
   console.log(`  CI auto-fix: ${config.autoFixCI ? "ON" : "off"} (poll ${config.ciPollSeconds}s, mode ${config.claudeFix.permissionMode})\n`);
   console.log(`  EOL auto-upgrade: ${config.autoUpgradeEOL ? "ON" : "off"} (scan every ${config.eolPollHours}h)\n`);
   console.log(`  Gem constraint auto-bump: ${config.autoFixGemConstraints ? "ON" : "off"} (blocked gems → constraint-bump PR)\n`);
+  const sync = stateSync.status();
+  if (sync.enabled) {
+    console.log(`  State sync: ${sync.paused ? "PAUSED" : "ON"} (${sync.dir}, ${config.stateSyncSeconds}s after the last save)\n`);
+  }
   startCIPoller();
   startEolPoller();
   startSequencePoller();
