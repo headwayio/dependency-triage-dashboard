@@ -1080,6 +1080,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Health
+    if (req.method === "GET" && route === "/api/state-sync") {
+      return sendJSON(res, 200, stateSync.status());
+    }
+
     if (req.method === "GET" && route === "/api/health") {
       try {
         const login = await gh.whoami();
