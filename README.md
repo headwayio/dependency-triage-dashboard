@@ -865,7 +865,9 @@ carries the script, so the PR the dashboard opens can actually merge once it's r
   checkout's test run. The dashboard creates the cluster with `initdb` on first use and
   leaves it running.
 - **How:** `mise install`, `bundle install`, the repo's `bin/test-parallel-prepare` (if
-  present) and `RAILS_ENV=test bin/rails db:prepare`, then `bin/signoff-browser`. It does
+  present), `RAILS_ENV=test bin/rails db:prepare`, whichever of `tailwindcss:build`,
+  `css:build` and `javascript:build` the app defines (compiled assets aren't in a fresh
+  clone, and an unstyled page fails nearly every browser spec), then `bin/signoff-browser`. It does
   **not** run `bin/setup`, which in some repos installs git hooks and agent tooling
   meant for a developer checkout.
 - **Status:** each PR shows 🖥 *signoff queued / signing off… / signed off / signoff
