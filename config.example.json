@@ -29,6 +29,8 @@
   "allowedHosts": [],
   "stateRepo": "",
   "stateSyncSeconds": 30,
+  "browserSignoff": false,
+  "signoffPgPort": 55433,
   "claudeFix": { "permissionMode": "auto", "timeoutMinutes": 12, "maxAttemptsPerSha": 2, "maxAttemptsPerRepo": 4 },
   "autoUpgradeEOL": false,
   "eolPollHours": 12,

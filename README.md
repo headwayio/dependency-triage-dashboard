@@ -845,6 +845,35 @@ counts down: a repo where the fixer *worked* four times would be capped exactly 
 where it never worked, and attempts spent on a PR that has since merged would count
 against it forever. The per-commit cap still bounds any single SHA.
 
+### Browser signoff — `browserSignoff`
+
+Some repos gate merging on a `signoff/browser` commit status that only a local run can
+post: their `bin/signoff-browser` runs the full browser suite on the exact pushed commit,
+then [`gh signoff`](https://github.com/basecamp/gh-signoff) marks it green. With
+`browserSignoff` on, the CI poller does that for every tool-opened PR in a repo that
+carries the script, so the PR the dashboard opens can actually merge once it's reviewed.
+
+- **When:** a tool PR's head has no successful `signoff/browser` yet, no other job is
+  running on the repo, and auto-fix isn't about to replace the head (CI failing with
+  fix budget left). Failing CI alone doesn't block it: a repo may require only the
+  signoff. A new head — a CI fix, a rebase — gets a new run. Each commit is run once: a
+  failing suite is recorded in `signoff-attempts.json` and not retried.
+- **Where:** a fresh clone of the PR branch at `.work/signoff/<repo>`, against a
+  **private Postgres** (`.work/.signoff-pg`, Unix socket only). A repo's test databases
+  have fixed names and its test-lease locks live in its own git directory, so running
+  from a separate clone against your shared Postgres could collide with another
+  checkout's test run. The dashboard creates the cluster with `initdb` on first use and
+  leaves it running.
+- **How:** `mise install`, `bundle install`, the repo's `bin/test-parallel-prepare` (if
+  present) and `RAILS_ENV=test bin/rails db:prepare`, then `bin/signoff-browser`. It does
+  **not** run `bin/setup`, which in some repos installs git hooks and agent tooling
+  meant for a developer checkout.
+- **Status:** each PR shows 🖥 *signoff queued / signing off… / signed off / signoff
+  failed*; the run's log is in the session log. One run at a time.
+
+Requires `initdb`/`pg_ctl` (PostgreSQL server binaries), Chrome/Chromium, and the
+`gh signoff` extension pinned by the repo's script.
+
 ### EOL auto-upgrade — `autoUpgradeEOL`
 When an end-of-life runtime turns up on a **maintained** repo, the runtime-upgrade PR
 above opens **automatically** (deduped per repo + runtime + target version in
@@ -989,6 +1018,8 @@ git-ignored, so your settings stay local):
 | `mergeMethod` | `squash` | preferred method for the **🔀 Merge** button (`squash` / `merge` / `rebase`); falls back to whatever the repo actually allows |
 | `deleteBranchOnMerge` | `true` | delete the head branch after a dashboard merge (kept regardless while another open PR is stacked on it) |
 | `ciPollSeconds` | `10` | how often to poll pending PRs' CI + review state (min 5). One GraphQL call batches every pending PR per cycle, which is what makes a cadence this fast cheap |
+| `browserSignoff` | `false` | for repos that carry `bin/signoff-browser`, run it on each tool PR's head commit so the required `signoff/browser` status gets posted — see [Browser signoff](#browser-signoff--browsersignoff) |
+| `signoffPgPort` | `55433` | port (Unix socket only, never TCP) of the private Postgres that signoff runs use |
 | `claudeFix` | *(object)* | CI-fix session: `permissionMode`, `timeoutMinutes` (12), and attempt caps `maxAttemptsPerSha` (2) / `maxAttemptsPerRepo` (4) |
 | `autoUpgradeEOL` | `false` | auto-open a runtime-upgrade PR for **maintained** repos on an EOL runtime |
 | `eolPollHours` | `12` | how often to re-scan runtimes against endoflife.date (min 1) |
