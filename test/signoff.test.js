@@ -91,3 +91,12 @@ test("sees a port another process is listening on", async (t) => {
   const { port } = srv.address();
   assert.equal(await portsBusy(port, port), true);
 });
+
+test("keeps the Postgres socket path under the Unix limit for a deep checkout", () => {
+  const { pgPaths } = require("../lib/signoff");
+  const shallow = pgPaths("/home/me/dash/.work", 55433);
+  assert.equal(shallow.sock, "/home/me/dash/.work/.signoff-pg/run");
+  const deep = pgPaths(`/home/me/${"nested/".repeat(15)}dash/.work`, 55433);
+  assert.ok(`${deep.sock}/.s.PGSQL.55433`.length <= 107, deep.sock);
+  assert.ok(deep.data.startsWith("/home/me/"), "the data directory stays in the work dir");
+});
