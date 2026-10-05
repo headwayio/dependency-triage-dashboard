@@ -1295,7 +1295,7 @@ const server = http.createServer(async (req, res) => {
         for (const r of modelCache.repos) {
           if (r.pending && (r.openPRs || []).length) {
             const links = state.prLinksFor(r.name); // { <prNumber>: { blockedBy, strategy } }
-            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], mergeable: p.mergeable || null, mergeStateStatus: p.mergeStateStatus || null, reviewUnresolved: p.reviewUnresolved || 0, ci: p.ci || null, baseRefName: p.baseRefName || null, lockfiles: p.lockfiles || [], link: links[p.number] || null }));
+            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], mergeable: p.mergeable || null, mergeStateStatus: p.mergeStateStatus || null, reviewUnresolved: p.reviewUnresolved || 0, ci: p.ci || null, signoff: p.signoff || null, baseRefName: p.baseRefName || null, lockfiles: p.lockfiles || [], link: links[p.number] || null }));
           }
         }
       }

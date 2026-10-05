@@ -2325,6 +2325,22 @@ function ciLabel(ci) {
   return `<span class="ci-inline ${cls}"${t}>${labels[ci.state]}</span>`;
 }
 
+// Browser signoff (repos that require signoff/browser): GitHub's status once posted, else
+// the tool's own run for this head — queued/running/failed — from pollCI's pr.signoff.
+function signoffLabel(pr) {
+  const s = pr && pr.signoff;
+  const labels = {
+    SUCCESS: ["ok", "🖥 signed off", "signoff/browser is green on this commit"],
+    QUEUED: ["warn", "🖥 signoff queued", "The browser suite will run on this commit"],
+    RUNNING: ["warn", "🖥 signing off…", "Running the browser suite on this commit"],
+    PENDING: ["warn", "🖥 signing off…", "signoff/browser is pending"],
+    FAILURE: ["danger", "🖥 signoff failed", "The browser suite failed on this commit — see the session log"],
+  };
+  if (!s || !labels[s]) return "";
+  const [cls, text, title] = labels[s];
+  return ` <span class="pr-meta">·</span> <span class="ci-inline ${cls}" title="${title}">${text}</span>`;
+}
+
 // A PR is rollup-eligible when its CI isn't red (or still running) and it isn't a draft or
 // flagged changes-requested — i.e. work that's ready to ship. Passing CI qualifies, and so
 // does a PR with NO checks at all ("none") — only FAILING or in-flight checks disqualify.
@@ -2526,7 +2542,7 @@ function prChips(r) {
   return prs
     .map((pr, i) => {
       const label = havePerPr ? ciLabel(pr.ci) : (i === 0 ? ci.text : "");
-      const ciText = label ? ` <span class="pr-meta">·</span> ${label}` : "";
+      const ciText = (label ? ` <span class="pr-meta">·</span> ${label}` : "") + signoffLabel(pr);
       let fixBtn = "";
       const isFailing = havePerPr ? !!(pr.ci && pr.ci.state === "failing") : i === 0;
       if (!btnShown && isFailing && ci.btn) { fixBtn = ci.btn; btnShown = true; }
@@ -2658,7 +2674,7 @@ async function pollPRStatus(refresh) {
           // pre-edit set, which would flip the badge back right after we changed it.
           const justEdited = pr._reviewersEditedAt && Date.now() - pr._reviewersEditedAt < 20000;
           if (m && !justEdited) { pr.reviewDecision = m.reviewDecision; pr.reviewers = m.reviewers; }
-          if (m) { pr.draft = m.draft; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
+          if (m) { pr.draft = m.draft; pr.mergeable = m.mergeable; pr.mergeStateStatus = m.mergeStateStatus; pr.reviewUnresolved = m.reviewUnresolved || 0; pr.ci = m.ci; pr.signoff = m.signoff || null; if (m.baseRefName != null) pr.baseRefName = m.baseRefName; if (m.lockfiles) pr.lockfiles = m.lockfiles; pr.link = m.link || null; }
         }
       }
     }
@@ -3327,7 +3343,7 @@ async function onRebase(r, btn) {
 // ---- Session-log history viewer --------------------------------------------
 // Past headless sessions for a repo (newest first) in a read-only overlay — so a run's
 // output is reviewable after it finishes (the live job is pruned; the server keeps the log).
-const SESSION_KIND_LABEL = { fix: "CI fix", review: "Review comments", rollup: "Rollup", stack: "Stack PRs", sequence: "Sequence PRs", rebase: "Rebase", major: "Major upgrades", unblock: "Unblock", bump: "Constraint bump", update: "Update PR", upgrade: "Runtime upgrade" };
+const SESSION_KIND_LABEL = { signoff: "Browser signoff", fix: "CI fix", review: "Review comments", rollup: "Rollup", stack: "Stack PRs", sequence: "Sequence PRs", rebase: "Rebase", major: "Major upgrades", unblock: "Unblock", bump: "Constraint bump", update: "Update PR", upgrade: "Runtime upgrade" };
 
 async function openSessionHistory(r) {
   let sessions = [];
@@ -4310,7 +4326,7 @@ function cardEl(repo) {
 // Busy label for a card's CTA button while its background job is queued/running.
 function jobBusyHtml(status, kind) {
   if (status === "queued") return "⏳ Queued";
-  const label = { fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…", unblock: "🔧 Unblocking…", major: "⬆ Upgrading majors…", rollup: "🧬 Rolling up…", stack: "🥞 Stacking…", sequence: "⏱ Sequencing…", rebase: "⟳ Rebasing…" }[kind] || "Working…";
+  const label = { signoff: "🖥 Signing off in the browser…", fix: "🔧 Fixing CI…", bump: "⛔ Bumping constraints…", upgrade: "⬆ Upgrading…", unblock: "🔧 Unblocking…", major: "⬆ Upgrading majors…", rollup: "🧬 Rolling up…", stack: "🥞 Stacking…", sequence: "⏱ Sequencing…", rebase: "⟳ Rebasing…" }[kind] || "Working…";
   return `<span class="spin"></span>${label}`;
 }
 
@@ -4500,7 +4516,7 @@ function handleJobEvent(evt) {
   if (evt.type === "done") {
     // Fix and rebase both edit an EXISTING PR branch (no new/closed PR) — just refresh the
     // PR's CI + merge state; don't run finishJob's move-into-Pending logic.
-    if (job.kind === "fix" || job.kind === "rebase") { JOBS.delete(repo); pollPRStatus(true); }
+    if (job.kind === "fix" || job.kind === "rebase" || job.kind === "signoff") { JOBS.delete(repo); pollPRStatus(true); }
     else if (job.kind === "review") { JOBS.delete(repo); onReviewJobDone(repo); }
     // Stack/sequence don't open or close PRs — they retarget bases / record an ordering. No
     // finishJob move logic; just clear the job and refresh PR meta so the card reflects it.
@@ -4509,7 +4525,9 @@ function handleJobEvent(evt) {
   } else if (evt.type === "pr") {
     mergeStreamedPR(repo, evt); // a fan-out PR opened mid-run — surface it now; job keeps running
   } else if (evt.type === "error") {
-    const isFix = job.kind === "fix";
+    // A failed signoff, like a failed fix, leaves the PR as it was: refresh its status
+    // rather than offering to retry the update.
+    const isFix = job.kind === "fix" || job.kind === "signoff";
     job.status = "error";
     JOBS.delete(repo);
     const b = card && card.querySelector(".act-update");
