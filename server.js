@@ -23,6 +23,7 @@ const reviews = require("./lib/reviews");
 const eol = require("./lib/eol");
 const protection = require("./lib/protection");
 const stateSync = require("./lib/statesync");
+const signoff = require("./lib/signoff");
 
 // ---- Config -----------------------------------------------------------------
 const ROOT = __dirname;
@@ -86,6 +87,8 @@ function loadConfig() {
     ciPollSeconds: 10,
     maxConcurrentFixes: 1,
     claudeFix: { permissionMode: "auto", timeoutMinutes: 12, maxAttemptsPerSha: 2, maxAttemptsPerRepo: 4 },
+    browserSignoff: false, // when true, run a repo's bin/signoff-browser on each tool PR head
+    signoffPgPort: 55433, // private Postgres for signoff runs (Unix socket only, never TCP)
     autoUpgradeEOL: false, // when true, auto-open a runtime-upgrade PR for EOL runtimes
     eolPollHours: 12,
     autoFixGemConstraints: false, // when true, a blocked gem auto-opens a constraint-bump PR
@@ -757,6 +760,93 @@ function runFixJob(job) {
   })();
 }
 
+// ---- Browser signoff ----------------------------------------------------------
+// For repos that gate merging on a signoff/browser status (they carry bin/signoff-browser),
+// run the signoff on each tool PR's head commit so the PR the tool opened can actually
+// merge. Started from pollCI; one run at a time. See lib/signoff.js.
+let signoffRunning = 0;
+const signoffCapability = new Map(); // nwo -> { capable, at }
+const SIGNOFF_CAPABILITY_TTL = 3600 * 1000;
+
+/** Whether the repo carries the signoff script on its default branch (cached for an hour). */
+async function signoffCapable(nwo) {
+  const hit = signoffCapability.get(nwo);
+  if (hit && Date.now() - hit.at < SIGNOFF_CAPABILITY_TTL) return hit.capable;
+  const res = await run("gh", ["api", `repos/${nwo}/contents/${signoff.SCRIPT}`, "--jq", ".type"]);
+  const capable = res.code === 0 && res.stdout.trim() === "file";
+  signoffCapability.set(nwo, { capable, at: Date.now() });
+  return capable;
+}
+
+function activeSignoffJob(repoName) {
+  for (const j of jobs.values()) {
+    if (j.kind === "signoff" && j.repo === repoName && (j.status === "queued" || j.status === "running")) return j;
+  }
+  return null;
+}
+
+function startSignoffJob(repoModel, pr, sha, branch) {
+  const existing = activeSignoffJob(repoModel.name);
+  if (existing) return existing;
+  const job = {
+    id: `signoff-${++jobSeq}`,
+    kind: "signoff",
+    repo: repoModel.name,
+    model: repoModel,
+    pr,
+    number: pr.number,
+    sha,
+    branch,
+    status: "queued",
+    queuedAt: Date.now(),
+    startedAt: null,
+    endedAt: null,
+    log: [],
+    error: null,
+  };
+  jobs.set(job.id, job);
+  jobEmit(job, "status", { status: "queued", kind: "signoff" });
+  jobEmit(job, "log", { line: `⏳ Queued browser signoff for PR #${pr.number} at ${sha.slice(0, 8)}…`, level: "info" });
+  pumpSignoffQueue();
+  return job;
+}
+
+function pumpSignoffQueue() {
+  for (const job of jobs.values()) {
+    if (signoffRunning >= 1) break;
+    if (job.kind === "signoff" && job.status === "queued") runSignoffJob(job);
+  }
+}
+
+function runSignoffJob(job) {
+  job.status = "running";
+  job.startedAt = Date.now();
+  signoffRunning++;
+  jobEmit(job, "status", { status: "running", kind: "signoff" });
+  (async () => {
+    try {
+      const emit = (type, data) => jobEmit(job, type, { ...data, kind: "signoff" });
+      await signoff.runSignoff({ config, repo: job.model, branch: job.branch, sha: job.sha, emit });
+      state.recordSignoffAttempt(job.repo, job.sha, "signed");
+      job.pr.signoff = "SUCCESS";
+      job.status = "done";
+      jobEmit(job, "done", { kind: "signoff", prUrl: job.pr.url });
+    } catch (e) {
+      // A moved branch or busy test ports isn't a failed signoff — the next poll retries.
+      if (!e.retryLater) state.recordSignoffAttempt(job.repo, job.sha, "failed");
+      job.status = "error";
+      jobEmit(job, "error", { message: e.message, kind: "signoff" });
+    } finally {
+      job.endedAt = Date.now();
+      signoffRunning--;
+      jobEmit(job, "status", { status: job.status, kind: "signoff" });
+      archiveJob(job);
+      pruneJobs();
+      pumpSignoffQueue();
+    }
+  })();
+}
+
 async function prBranch(nwo, number) {
   const res = await run("gh", ["pr", "view", String(number), "--repo", nwo, "--json", "headRefName", "--jq", ".headRefName"]);
   return res.code === 0 ? res.stdout.trim() : null;
@@ -800,6 +890,23 @@ async function computeConsolidationCluster(nwo) {
 }
 
 const STATE_RANK = { failing: 3, pending: 2, none: 1, unknown: 0, passing: 0 };
+
+function shouldStartSignoffFor(r, st) {
+  return signoff.shouldStartSignoff({
+    enabled: config.browserSignoff,
+    capable: true, // checked last (it can hit the API); see signoffCapable
+    headSha: st.headSha,
+    awaitingFix: !!(
+      config.autoFixCI &&
+      st.state === "failing" &&
+      state.fixAttemptCount(r.name, st.headSha) < (config.claudeFix.maxAttemptsPerSha || 2) &&
+      state.fixTotalForRepo(r.name) < (config.claudeFix.maxAttemptsPerRepo || 4)
+    ),
+    checks: st.checks,
+    attempted: !!state.signoffAttempt(r.name, st.headSha),
+    busy: !!findActiveJob(r.name),
+  });
+}
 
 async function pollCI() {
   if (!modelCache) return;
@@ -848,6 +955,12 @@ async function pollCI() {
     if (st.baseRefName) pr.baseRefName = st.baseRefName; // keep fresh so a retargeted base (stack) shows promptly
     pr.reviewUnresolved = st.reviewUnresolved || 0;
     pr.ci = { state: st.state, failing: (st.failing || []).map((f) => f.name), headSha: st.headSha };
+    // Signoff badge: GitHub's status when present, else what this tool is doing about it.
+    const attempt = state.signoffAttempt(r.name, st.headSha);
+    const signoffJob = activeSignoffJob(r.name);
+    pr.signoff = signoff.signoffConclusion(st.checks) ||
+      (signoffJob && signoffJob.sha === st.headSha ? signoffJob.status.toUpperCase() : null) ||
+      (attempt && attempt.result === "failed" ? "FAILURE" : null);
     const w = worstByRepo.get(r.name);
     if (!w || (STATE_RANK[st.state] || 0) > (STATE_RANK[w.state] || 0)) worstByRepo.set(r.name, st);
     // Tally per state rather than reusing worstByRepo: passing and unknown share a rank
@@ -871,6 +984,17 @@ async function pollCI() {
       const failingLogs = await ci.fetchFailingLogs(nwo, st.failing);
       startFixJob(r, pr, st, failingLogs);
       fixStarted.add(r.name);
+    }
+
+    // Sign off the head once nothing is about to move it. `busy` covers any job on the repo
+    // (update, fix, rebase, an earlier signoff) — each may push a new head.
+    if (
+      config.browserSignoff &&
+      shouldStartSignoffFor(r, st) &&
+      (await signoffCapable(nwo))
+    ) {
+      const branch = await prBranch(nwo, pr.number);
+      if (branch) startSignoffJob(r, pr, st.headSha, branch);
     }
   }
   // A repo whose PRs have ALL settled green is fixed — release its per-repo fix budget so
@@ -1171,7 +1295,7 @@ const server = http.createServer(async (req, res) => {
         for (const r of modelCache.repos) {
           if (r.pending && (r.openPRs || []).length) {
             const links = state.prLinksFor(r.name); // { <prNumber>: { blockedBy, strategy } }
-            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], mergeable: p.mergeable || null, mergeStateStatus: p.mergeStateStatus || null, reviewUnresolved: p.reviewUnresolved || 0, ci: p.ci || null, baseRefName: p.baseRefName || null, lockfiles: p.lockfiles || [], link: links[p.number] || null }));
+            prMeta[r.name] = r.openPRs.map((p) => ({ number: p.number, draft: !!p.draft, reviewDecision: p.reviewDecision || null, reviewers: p.reviewers || [], mergeable: p.mergeable || null, mergeStateStatus: p.mergeStateStatus || null, reviewUnresolved: p.reviewUnresolved || 0, ci: p.ci || null, signoff: p.signoff || null, baseRefName: p.baseRefName || null, lockfiles: p.lockfiles || [], link: links[p.number] || null }));
           }
         }
       }
@@ -2052,6 +2176,7 @@ server.listen(PORT, HOST, () => {
   console.log(`  CI auto-fix: ${config.autoFixCI ? "ON" : "off"} (poll ${config.ciPollSeconds}s, mode ${config.claudeFix.permissionMode})\n`);
   console.log(`  EOL auto-upgrade: ${config.autoUpgradeEOL ? "ON" : "off"} (scan every ${config.eolPollHours}h)\n`);
   console.log(`  Gem constraint auto-bump: ${config.autoFixGemConstraints ? "ON" : "off"} (blocked gems → constraint-bump PR)\n`);
+  console.log(`  Browser signoff: ${config.browserSignoff ? "ON" : "off"} (repos with ${signoff.SCRIPT} → ${signoff.CONTEXT} on each tool PR head)\n`);
   const sync = stateSync.status();
   if (sync.enabled) {
     console.log(`  State sync: ${sync.paused ? "PAUSED" : "ON"} (${sync.dir}, ${config.stateSyncSeconds}s after the last save)\n`);

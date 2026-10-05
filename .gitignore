@@ -20,6 +20,7 @@ dismissals.json
 bump-attempts.json
 upgrade-attempts.json
 fix-attempts.json
+signoff-attempts.json
 notifications.json
 scope-overrides.json
 engagement-log.json
