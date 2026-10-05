@@ -283,6 +283,27 @@ Then open <http://127.0.0.1:8787>. Press **Refresh** to re-scan GitHub. Client f
 the watcher only needs to restart for server-side changes. (A watch-restart ends any
 in-flight background job, so avoid editing server code mid-run.)
 
+### Using it from another of your devices (optional)
+
+The server only listens on loopback. To reach it from another device, either tunnel
+(`ssh -N -L 8787:127.0.0.1:8787 you@this-machine`, then browse `http://127.0.0.1:8787`
+there), or publish it to your **tailnet** with [`tailscale serve`](https://tailscale.com/kb/1312/serve),
+which adds HTTPS and is reachable only from devices on your tailnet:
+
+```bash
+tailscale serve --bg 8787        # → https://<this-machine>.<tailnet>.ts.net
+```
+
+The routes that change things reject any `Host` or `Origin` that isn't localhost
+(DNS-rebinding and CSRF protection), so also list that name in `config.json`:
+
+```json
+"allowedHosts": ["this-machine.your-tailnet.ts.net"]
+```
+
+Everyone who can reach that name can use the dashboard as you — every device on your
+tailnet, including any you've shared it with. `tailscale serve reset` turns it off.
+
 ### Sharing state between machines (optional)
 
 The config and state files are git-ignored because this repo is public — they hold
@@ -398,6 +419,17 @@ auth.
      [Hex / Elixir scanning](#hex--elixir-scanning). A package a `mix.exs` constraint
      caps below its patched floor is reported in the **Blocked** table for a manual
      constraint bump (the Elixir analog of the gem/parent-constraint case).
+   Each step runs **in the directory of the manifest** Dependabot reported the
+   alert against, not just the repo root. A repo can hold several independent
+   projects (a Rails app at the root, an Electron app in `desktop/electron/`); the
+   flagged packages are grouped by manifest directory and every directory runs its
+   own update → re-audit → overrides fallback → re-verify, against its own
+   `package.json` and lockfile, under its own pinned runtime (falling back to the
+   root pins when it has none). Git — stage, commit, push, PR — still happens once
+   for the whole repo, and when any advisory lives outside the root the PR tables
+   gain a **Directory** column. Before this, a nested project was updated at the
+   root: `npm audit fix` changed nothing there and the overrides fallback wrote
+   inert entries into the root `package.json`.
 4. If nothing changed, it stops and tells you (no empty PR). On this no-change
    path it also **auto-closes any obsolete PR** the tool previously opened for the
    repo — a re-check that produces no diff means the flagged advisories are already
@@ -408,8 +440,8 @@ auth.
    never touched. Disable with `"closeObsoletePRs": false`. The same no-change path
    also comments **`@dependabot recreate`** on the repo's open `dependabot/*` PRs
    that are **already satisfied on the default branch** — the PR's target (from its
-   `Bump <pkg> from <a> to <b>` title) is compared against the installed lockfile
-   version, so still-needed bumps (pagy, aws-sdk, …) and unverifiable ones
+   `Bump <pkg> from <a> to <b>` title, plus its `in /<dir>` suffix for a nested
+   project) is compared against the installed version in that directory's lockfile, so still-needed bumps (pagy, aws-sdk, …) and unverifiable ones
    (github-actions, git-sha pins) are left alone. Dependabot then self-closes the
    superseded ones. Deduped to once per PR per day. Disable with
    `"nudgeDependabotOnClear": false`.
@@ -963,6 +995,7 @@ git-ignored, so your settings stay local):
 | `autoFixGemConstraints` | `false` | a **blocked** gem auto-opens a constraint-bump PR |
 | `claudeBump` | *(object)* | constraint-bump session: `permissionMode` + `timeoutMinutes` (20) |
 | `emailHourlyRate` | `200` | legacy — the live rate is the Settings panel / `settings.toml` (`estimate.hourly_rate`) |
+| `allowedHosts` | `[]` | extra hostnames trusted like localhost by the Host/Origin checks — e.g. your `tailscale serve` name; see [Using it from another of your devices](#using-it-from-another-of-your-devices-optional) |
 | `stateRepo` | `""` | path to a private git repo holding your (symlinked) config + state files; pulled on startup and committed + pushed after saves — see [Sharing state between machines](#sharing-state-between-machines-optional) |
 | `stateSyncSeconds` | `30` | how long after the last save to wait before committing + pushing the state repo |
 | `dismissToken` | `""` | token for the **Dismiss-on-GitHub** calls only — **prefer the `DISMISS_GH_TOKEN` env var or the git-ignored `.dismiss-token` file** over this key (read fresh, no restart; keeps the secret out of your config) — see [Credentials](#credentials--local-setup) |

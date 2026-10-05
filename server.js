@@ -90,6 +90,7 @@ function loadConfig() {
     eolPollHours: 12,
     autoFixGemConstraints: false, // when true, a blocked gem auto-opens a constraint-bump PR
     claudeBump: { permissionMode: "auto", timeoutMinutes: 20 },
+    allowedHosts: [], // extra hostnames trusted like localhost, e.g. a `tailscale serve` name
     stateRepo: "", // optional git repo holding the (symlinked) state files; synced on startup + after saves
     stateSyncSeconds: 30, // wait this long after the last save before committing + pushing
     dismissToken: "", // optional dedicated token for the Dismiss-on-GitHub calls only
@@ -116,6 +117,8 @@ function loadConfig() {
       claudeFix: { ...defaults.claudeFix, ...(raw.claudeFix || {}) },
       claudeBump: { ...defaults.claudeBump, ...(raw.claudeBump || {}) },
       protection: { ...defaults.protection, ...(raw.protection || {}) },
+      // Exact hostnames only: a stray string here must not become a substring match.
+      allowedHosts: Array.isArray(raw.allowedHosts) ? raw.allowedHosts.map((h) => String(h).toLowerCase()) : [],
     };
   } catch {
     return defaults;
@@ -1022,10 +1025,15 @@ function readBody(req) {
   });
 }
 
-/** Guard mutating endpoints against DNS-rebinding: Host must be loopback. */
+/** Loopback, or a hostname config.allowedHosts opts in (e.g. a `tailscale serve` name). */
+function isAllowedHostname(host) {
+  const h = String(host || "").toLowerCase();
+  return ["127.0.0.1", "localhost", "[::1]", "::1"].includes(h) || config.allowedHosts.includes(h);
+}
+
+/** Guard mutating endpoints against DNS-rebinding: Host must be loopback or allowed. */
 function isLocalHost(req) {
-  const host = (req.headers.host || "").split(":")[0];
-  return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  return isAllowedHostname((req.headers.host || "").split(":")[0]);
 }
 
 /** Throw an Error carrying an HTTP status; the route catch sends it as JSON. */
@@ -1045,9 +1053,7 @@ function assertLocal(req) {
   if (origin) {
     let host = null;
     try { host = new URL(origin).hostname; } catch { /* malformed → reject */ }
-    if (host !== "127.0.0.1" && host !== "localhost" && host !== "[::1]" && host !== "::1") {
-      fail(403, "cross-origin request rejected");
-    }
+    if (!isAllowedHostname(host)) fail(403, "cross-origin request rejected");
   }
 }
 
@@ -2040,6 +2046,7 @@ server.listen(PORT, HOST, () => {
   }
   console.log(`  Org:    ${config.org || "(unset — edit config.json: \"org\": \"your-github-org\")"}`);
   console.log(`  Serving ${url}  (bound to ${HOST} only)`);
+  if (config.allowedHosts.length) console.log(`  Also trusted: ${config.allowedHosts.join(", ")}`);
   console.log(`  PRs:    ${config.draftPRs ? "draft" : "ready"} by default\n`);
   console.log(`  Open ${url} in your browser. Ctrl+C to stop.\n`);
   console.log(`  CI auto-fix: ${config.autoFixCI ? "ON" : "off"} (poll ${config.ciPollSeconds}s, mode ${config.claudeFix.permissionMode})\n`);
