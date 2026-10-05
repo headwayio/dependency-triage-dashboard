@@ -26,6 +26,7 @@
   "maxConcurrentUpdates": 3,
   "maxConcurrentFixes": 1,
   "dismissToken": "",
+  "allowedHosts": [],
   "stateRepo": "",
   "stateSyncSeconds": 30,
   "claudeFix": { "permissionMode": "auto", "timeoutMinutes": 12, "maxAttemptsPerSha": 2, "maxAttemptsPerRepo": 4 },
