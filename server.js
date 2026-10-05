@@ -832,8 +832,8 @@ function runSignoffJob(job) {
       job.status = "done";
       jobEmit(job, "done", { kind: "signoff", prUrl: job.pr.url });
     } catch (e) {
-      // A branch that moved isn't a failed signoff — the next poll signs the new head.
-      if (!/ moved to /.test(e.message)) state.recordSignoffAttempt(job.repo, job.sha, "failed");
+      // A moved branch or busy test ports isn't a failed signoff — the next poll retries.
+      if (!e.retryLater) state.recordSignoffAttempt(job.repo, job.sha, "failed");
       job.status = "error";
       jobEmit(job, "error", { message: e.message, kind: "signoff" });
     } finally {

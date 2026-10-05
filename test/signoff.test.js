@@ -11,7 +11,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
-const { shouldStartSignoff, signoffConclusion, ensurePostgres, CONTEXT } = require("../lib/signoff");
+const { shouldStartSignoff, signoffConclusion, ensurePostgres, capybaraBasePort, portsBusy, CONTEXT } = require("../lib/signoff");
 const { describeChanges } = require("../lib/statesync");
 
 const ready = { enabled: true, capable: true, headSha: "abc123", awaitingFix: false, checks: [], attempted: false, busy: false };
@@ -69,4 +69,25 @@ test("the private Postgres is socket-only and reused across runs", { skip: !have
   lines.length = 0;
   await ensurePostgres({ workRoot, port, log: (l) => lines.push(l) });
   assert.deepEqual(lines, [], "second call neither re-inits nor restarts");
+});
+
+test("finds the app-server port a repo's Capybara config pins", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "signoff-port-"));
+  try {
+    assert.equal(capybaraBasePort(dir), null, "no config, no pinned port");
+    fs.mkdirSync(path.join(dir, "spec/support"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "spec/support/capybara.rb"), 'Capybara.server_port = 9887 + (ENV["TEST_ENV_NUMBER"] || 0).to_i\n');
+    assert.equal(capybaraBasePort(dir), 9887);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sees a port another process is listening on", async (t) => {
+  const net = require("net");
+  const srv = net.createServer().listen(0, "127.0.0.1");
+  await new Promise((r) => srv.once("listening", r));
+  t.after(() => srv.close());
+  const { port } = srv.address();
+  assert.equal(await portsBusy(port, port), true);
 });
